@@ -1,0 +1,11 @@
+__pycache__
+*.py[cod]
+.venv
+venv
+.env
+.git
+*.md
+.dockerignore
+Dockerfile
+docker-compose*.yml
+.cursor
