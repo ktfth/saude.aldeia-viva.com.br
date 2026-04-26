@@ -488,29 +488,17 @@ class AppImportTest(unittest.TestCase):
         self.assertTrue(app.db_metadata["cache"]["hit"])
         self.assertEqual(app.db_metadata["cache"]["source"], "disk")
 
-    def test_load_or_refresh_report_uses_bundled_snapshot_on_vercel(self) -> None:
-        report = sample_report()
-
+    def test_load_or_refresh_report_uses_embedded_snapshot_before_fetching(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with (
                 patch.object(app, "SINAN_CACHE_DIR", Path(tmpdir)),
-                patch.object(app, "BUNDLED_REPORT_DIR", Path(tmpdir) / "bundled"),
-                patch.dict("os.environ", {"VERCEL": "1"}, clear=False),
                 patch.object(
                     app,
-                    "enabled_disease_sources",
-                    return_value=[app.DISEASE_SOURCES["DENG"]],
+                    "fetch_epidemiology_report",
+                    side_effect=AssertionError("should not fetch"),
                 ),
             ):
-                bundled_path = app.bundled_report_cache_path(2026, ["DENG"])
-                app.save_report_cache(report, bundled_path)
-
-                with patch.object(
-                    app,
-                    "fetch_epidemiology_report",
-                    side_effect=AssertionError("should not fetch on Vercel"),
-                ):
-                    loaded = app.load_or_refresh_report(2026)
+                loaded = app.load_or_refresh_report(2026)
 
         self.assertEqual(loaded["metadata"]["status"], "ok")
         self.assertEqual(app.db_metadata["cache"]["source"], "bundled")

@@ -26,6 +26,11 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.concurrency import run_in_threadpool
 
+try:
+    from bundled_report_snapshot import load_embedded_report_snapshot
+except ImportError:  # pragma: no cover - fallback for local-only runs before bundling
+    load_embedded_report_snapshot = None
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -40,11 +45,6 @@ DEFAULT_YEAR = int(os.getenv("SINAN_YEAR", datetime.now(UTC).year))
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("SINAN_REQUEST_TIMEOUT_SECONDS", "45"))
 SINAN_CACHE_DIR = Path(os.getenv("SINAN_CACHE_DIR", ".cache/datasus"))
 APP_ROOT = Path(__file__).resolve().parent
-BUNDLED_REPORT_DIRS = (
-    APP_ROOT / "api" / "data",
-    APP_ROOT / "data",
-)
-BUNDLED_REPORT_DIR = BUNDLED_REPORT_DIRS[0]
 REPORT_CACHE_VERSION = "risk-report-v1"
 DEFAULT_DISEASE_CODES = (
     "DENG",
@@ -777,17 +777,6 @@ def report_cache_path(year: int, disease_codes: Iterable[str]) -> Path:
     return report_cache_file_path(SINAN_CACHE_DIR, year, disease_codes)
 
 
-def bundled_report_cache_path(year: int, disease_codes: Iterable[str]) -> Path:
-    return report_cache_file_path(BUNDLED_REPORT_DIRS[0], year, disease_codes)
-
-
-def bundled_report_cache_paths(year: int, disease_codes: Iterable[str]) -> list[Path]:
-    return [
-        report_cache_file_path(root_dir, year, disease_codes)
-        for root_dir in BUNDLED_REPORT_DIRS
-    ]
-
-
 def report_cache_file_path(
     root_dir: Path, year: int, disease_codes: Iterable[str]
 ) -> Path:
@@ -825,29 +814,6 @@ def load_report_cache(path: Path) -> dict[str, Any]:
     return loaded
 
 
-def report_has_content(report: Mapping[str, Any]) -> bool:
-    metadata = report.get("metadata") or {}
-    return clean_value(metadata.get("status")) == "ok" and bool(
-        report.get("municipios")
-    )
-
-
-def load_bundled_report_cache(
-    year: int, disease_codes: Iterable[str]
-) -> dict[str, Any] | None:
-    for path in bundled_report_cache_paths(year, disease_codes):
-        if not path.exists():
-            continue
-        try:
-            report = load_report_cache(path)
-        except Exception as error:
-            logger.warning("Cache embarcado inválido em %s: %s", path, error)
-            continue
-        if report_has_content(report):
-            return report
-    return None
-
-
 def public_report_cache_path(path: Path) -> str:
     try:
         return path.relative_to(SINAN_CACHE_DIR).as_posix()
@@ -883,6 +849,13 @@ def apply_report_state(
     db_metadata = metadata
 
 
+def report_has_content(report: Mapping[str, Any]) -> bool:
+    metadata = report.get("metadata") or {}
+    return clean_value(metadata.get("status")) == "ok" and bool(
+        report.get("municipios")
+    )
+
+
 def report_cache_disabled() -> bool:
     return (
         os.getenv("SINAN_DISABLE_REPORT_CACHE") == "1"
@@ -895,22 +868,6 @@ def load_or_refresh_report(
 ) -> dict[str, Any]:
     enabled_codes = [source.codigo for source in enabled_disease_sources()]
     cache_path = report_cache_path(year, enabled_codes)
-    bundled_report = None
-
-    if os.getenv("VERCEL") == "1" and not force_refresh:
-        bundled_report = load_bundled_report_cache(year, enabled_codes)
-        if bundled_report is not None:
-            apply_report_state(
-                bundled_report,
-                cache_hit=True,
-                cache_path=bundled_report_cache_path(year, enabled_codes),
-                cache_source="bundled",
-            )
-            logger.info(
-                "Relatório epidemiológico carregado do snapshot embarcado: %s",
-                bundled_report_cache_path(year, enabled_codes),
-            )
-            return bundled_report
 
     if not force_refresh and not report_cache_disabled() and cache_path.exists():
         try:
@@ -923,20 +880,39 @@ def load_or_refresh_report(
         except Exception as error:
             logger.warning("Cache agregado inválido em %s: %s", cache_path, error)
 
-    report = fetch_epidemiology_report(year)
-    if not report_has_content(report):
-        bundled_report = load_bundled_report_cache(year, enabled_codes)
-        if bundled_report is not None:
+    bundled_report = None
+    if not force_refresh and load_embedded_report_snapshot is not None:
+        try:
+            bundled_report = load_embedded_report_snapshot()
+        except Exception as error:
+            logger.warning("Snapshot embarcado inválido: %s", error)
+            bundled_report = None
+        if bundled_report is not None and report_has_content(bundled_report):
             apply_report_state(
                 bundled_report,
                 cache_hit=True,
-                cache_path=bundled_report_cache_path(year, enabled_codes),
+                cache_path=None,
                 cache_source="bundled",
             )
-            logger.warning(
-                "Carga real vazia; usando snapshot embarcado em %s",
-                bundled_report_cache_path(year, enabled_codes),
+            logger.info("Relatório epidemiológico carregado do snapshot embarcado.")
+            return bundled_report
+
+    report = fetch_epidemiology_report(year)
+    if not report_has_content(report):
+        if load_embedded_report_snapshot is not None:
+            try:
+                bundled_report = load_embedded_report_snapshot()
+            except Exception as error:
+                logger.warning("Snapshot embarcado inválido: %s", error)
+                bundled_report = None
+        if bundled_report is not None and report_has_content(bundled_report):
+            apply_report_state(
+                bundled_report,
+                cache_hit=True,
+                cache_path=None,
+                cache_source="bundled",
             )
+            logger.warning("Carga real vazia; usando snapshot embarcado.")
             if not report_cache_disabled():
                 try:
                     save_report_cache(report=bundled_report, path=cache_path)
