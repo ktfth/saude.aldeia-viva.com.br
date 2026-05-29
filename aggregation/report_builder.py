@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any, Iterable, Mapping
 
 from domain.disease_sources import DISEASE_SOURCES, classification_label
+from domain.rates import incidence_per_100k
 from domain.risk import (
     RISK_FORMULA,
     finalize_disease_summary,
@@ -54,16 +55,24 @@ def create_municipality_summary(
     municipality_code: str,
     record: Mapping[str, Any],
     year: int,
-    lookup_item: Mapping[str, str] | None,
+    lookup_item: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     state = clean_value(lookup_item.get("estado") if lookup_item else "")
     if not state:
         state = _state_from_record(record)
+
+    # populacao is optional — read it from the lookup item when present.
+    # The value may be an int (preferred) or absent; default to None for
+    # graceful degradation in rate calculations downstream.
+    raw_populacao = lookup_item.get("populacao") if lookup_item else None
+    populacao: int | None = int(raw_populacao) if raw_populacao is not None else None
+
     return {
         "codigo_municipio": municipality_code,
         "municipio": clean_value(lookup_item.get("municipio") if lookup_item else "")
         or f"Código {municipality_code}",
         "estado": state,
+        "populacao": populacao,
         "periodo": {"ano": year},
         "fonte": "SINAN/OpenDataSUS",
         "formula_risco": RISK_FORMULA,
@@ -187,6 +196,10 @@ def finalize_municipality_rows(
             municipality["total_casos_provaveis"],
             municipality["total_casos_graves"],
             municipality["total_obitos"],
+        )
+        municipality["taxa_incidencia_100k"] = incidence_per_100k(
+            municipality["total_casos_provaveis"],
+            municipality.get("populacao"),
         )
         rows.append(municipality)
 
