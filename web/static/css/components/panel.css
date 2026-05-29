@@ -1,0 +1,10 @@
+/**
+ * Panels / Cards base
+ */
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}

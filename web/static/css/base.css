@@ -1,0 +1,53 @@
+/**
+ * Base / Resets / Tipografia global
+ */
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at top left, rgba(20, 108, 67, .08), transparent 32rem),
+    linear-gradient(180deg, #f7faf8 0%, #fbfdfb 42%, #f7faf8 100%);
+  color: var(--ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.5;
+}
+
+a { color: inherit; }
+
+h1, h2, h3 { margin: 0; line-height: 1.08; letter-spacing: 0; }
+
+h1 { max-width: 780px; font-size: clamp(2.1rem, 4.2vw, 4rem); letter-spacing: -.04em; }
+h2 { font-size: clamp(1.45rem, 3vw, 2.35rem); letter-spacing: -.03em; }
+h3 { font-size: 1.04rem; }
+
+.lead { max-width: 760px; color: var(--muted); font-size: clamp(1.05rem, 2vw, 1.24rem); }
+
+.eyebrow {
+  margin: 0 0 12px;
+  color: var(--green);
+  font-size: .82rem;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+/* Acessibilidade */
+.skip-link {
+  position: fixed;
+  left: 16px;
+  top: 12px;
+  z-index: 100;
+  transform: translateY(-160%);
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: #fff;
+  font-weight: 800;
+  text-decoration: none;
+  transition: transform .18s ease;
+}
+.skip-link:focus { transform: translateY(0); }

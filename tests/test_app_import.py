@@ -166,8 +166,26 @@ class AppImportTest(unittest.TestCase):
 
         self.assertEqual(disease["casos_graves"], 1)
         self.assertEqual(
-            disease["classificacoes"], {"Febre hemorrágica do dengue": 1}
-        )
+            disease["classificacoes"], {"Febre hemorrágica do dengue": 1})
+
+    def test_dashboard_uses_extracted_static_assets(self) -> None:
+        """Phase 0 safety check: dashboard should load CSS/JS from /static instead of huge inlines."""
+        client = TestClient(app.app)
+        resp = client.get("/dashboard")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.text
+
+        # Must reference the extracted static files
+        self.assertIn("/static/css/main.css", html)
+        self.assertIn("/static/js/dashboard.js", html)
+
+        # Should NOT contain the old giant inline <style> with thousands of chars of BASE_CSS
+        style_tag_count = html.count("<style>")
+        self.assertLess(style_tag_count, 3, "Too many inline style blocks - CSS extraction incomplete")
+
+        # Sanity: key UI patterns from the extracted CSS/JS must still be present
+        self.assertIn("class=\"panel", html)  # CSS classes are served
+        self.assertIn("risk-dashboard", html)
 
     def test_filter_risk_index_resolves_perus_to_sao_paulo_municipality(self) -> None:
         rows = [
@@ -272,7 +290,8 @@ class AppImportTest(unittest.TestCase):
         self.assertEqual(disease["classificacoes"], {"Febre amarela confirmada": 1})
 
     def test_filter_records_by_latest_available_year_uses_previous_year(self) -> None:
-        year, rows = app.filter_records_by_latest_available_year(
+        from ingestion.sinan_loader import filter_records_by_latest_available_year
+        year, rows = filter_records_by_latest_available_year(
             [
                 {"ANO_IS": "2024", "ID": "1"},
                 {"ANO_IS": "2025", "ID": "2"},
@@ -413,9 +432,10 @@ class AppImportTest(unittest.TestCase):
         self.assertIn("12*casos_graves", lept["formula_risco"])
 
     def test_build_dbc_source_url_uses_datasus_ftp_pattern(self) -> None:
+        from ingestion.sinan_loader import build_dbc_source_url
         source = app.DISEASE_SOURCES["LEPT"]
 
-        url = app.build_dbc_source_url(source, 2024)
+        url = build_dbc_source_url(source, 2024)
 
         self.assertEqual(
             url,
@@ -423,13 +443,14 @@ class AppImportTest(unittest.TestCase):
         )
 
     def test_normalize_dbf_record_serializes_dates_and_none(self) -> None:
+        from ingestion.sinan_loader import normalize_dbf_record
         row = {
             "DT_NOTIFIC": date(2024, 1, 2),
             "DT_OBITO": None,
             "NU_ANO": "2024",
         }
 
-        normalized = app.normalize_dbf_record(row)
+        normalized = normalize_dbf_record(row)
 
         self.assertEqual(
             normalized,
@@ -664,3 +685,4 @@ def seed_web_globals() -> None:
             "ultima_notificacao": "2026-04-21",
         }
     ]
+

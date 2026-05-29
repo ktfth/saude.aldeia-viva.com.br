@@ -1,0 +1,28 @@
+/**
+ * Alertas (lista de high-alerts no dashboard)
+ */
+
+.alert-list { display: grid; gap: 12px; }
+
+.alert-item {
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--green);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.alert-item.critico { border-left-color: var(--red); }
+.alert-item.alto { border-left-color: var(--amber); }
+.alert-item.moderado { border-left-color: var(--blue); }
+
+.alert-item header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.alert-item header strong { line-height: 1.25; }
+.alert-item p { margin: 0; color: var(--muted); line-height: 1.5; }

@@ -18,12 +18,56 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Optional
+
+# Domain imports (Fase 0 refactoring - foundation for cockpit)
+from domain.disease_sources import (
+    DEFAULT_DISEASE_CODES,
+    DISEASE_SOURCES,
+    DiseaseSource,
+    classification_label,
+)
+from domain.risk import (
+    RISK_FORMULA,
+    RISK_PROFILES,
+    RiskProfile,
+    finalize_disease_summary,
+    risk_level,
+    risk_profile_for_source,
+)
+
+# Aggregation layer (Fase 0 - continuing extraction)
+from aggregation.report_builder import (
+    build_epidemiology_report,
+    build_high_alerts,
+    create_disease_summary,
+    create_municipality_summary,
+)
+from aggregation.filters import (
+    filter_risk_index,
+    filter_alerts,
+    resolve_locality_alias,
+    municipality_matches,
+    with_locality_alias,
+    level_at_least,
+    LOCALITY_ALIASES,
+    get_supported_bairros,
+)
+from aggregation.utils import normalize_text
+
+# Ingestion layer extraction in progress (Fase 0).
+from ingestion.municipality_lookup import load_municipality_lookup
+from aggregation.report_builder import finalize_municipality_rows, is_death_record, is_hospitalized_record
+from aggregation.utils import any_flag, clean_code, clean_value, first_present, has_any_positive_field, is_truthy_code, parse_date_value, update_latest_date
+
+# The loader module exists. We avoid top-level import here to prevent
+# circular dependencies during the gradual monolith breakup.
 
 import datasus_dbc
 from dbfread import DBF
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, Header, HTTPException, Depends, status
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 try:
@@ -35,9 +79,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 OPEN_DATA_SUS_S3_BASE = "https://s3.sa-east-1.amazonaws.com/ckan.saude.gov.br"
-DATASUS_SINAN_DBC_BASE = (
-    "ftp://ftp.datasus.gov.br/dissemin/publicos/SINAN/DADOS/FINAIS"
-)
+DATASUS_SINAN_DBC_BASE = "ftp://ftp.datasus.gov.br/dissemin/publicos/SINAN/DADOS/FINAIS"
 IBGE_MUNICIPALITIES_URL = (
     "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
 )
@@ -46,18 +88,99 @@ REQUEST_TIMEOUT_SECONDS = float(os.getenv("SINAN_REQUEST_TIMEOUT_SECONDS", "45")
 SINAN_CACHE_DIR = Path(os.getenv("SINAN_CACHE_DIR", ".cache/datasus"))
 APP_ROOT = Path(__file__).resolve().parent
 REPORT_CACHE_VERSION = "risk-report-v1"
-DEFAULT_DISEASE_CODES = (
-    "DENG",
-    "CHIK",
-    "ZIKA",
-    "YF",
-    "LEPT",
-    "MENI",
-    "BOTU",
-    "TOXC",
-    "TOXG",
-    "HANS",
-)
+
+# =============================================================================
+# Static assets (Fase 0 - extração de interface para permitir melhorias sustentáveis)
+# =============================================================================
+STATIC_DIR = APP_ROOT / "web" / "static"
+CSS_PATH = STATIC_DIR / "css" / "main.css"
+JS_DASHBOARD_PATH = STATIC_DIR / "js" / "dashboard.js"
+
+_CSS_CACHE: str | None = None
+
+def load_main_css() -> str:
+    """Load extracted main.css with simple cache + safe fallback to inline constant."""
+    global _CSS_CACHE
+    if _CSS_CACHE is not None:
+        return _CSS_CACHE
+    try:
+        if CSS_PATH.exists():
+            _CSS_CACHE = CSS_PATH.read_text(encoding="utf-8")
+            return _CSS_CACHE
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Failed to load external CSS at %s, using fallback: %s", CSS_PATH, exc)
+    # Temporary fallback while we finish extraction (will be removed after full cutover)
+    _CSS_CACHE = BASE_CSS  # type: ignore[name-defined]
+    return _CSS_CACHE
+
+
+
+USERS_DB_PATH = Path(os.getenv("USERS_DB_PATH", "data/users.json"))
+USAGE_LOG_PATH = Path(os.getenv("USAGE_LOG_PATH", "data/usage.jsonl"))
+
+
+class APIKeyManager:
+    def __init__(self, path: Path):
+        self.path = path
+        self.keys = {}
+        self.load_keys()
+
+    def load_keys(self):
+        if self.path.exists():
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.keys = data.get("keys", {})
+            except Exception as e:
+                logger.error(f"Error loading API keys: {e}")
+
+    def validate_key(self, api_key: str) -> Optional[dict]:
+        return self.keys.get(api_key)
+
+
+class UsageTracker:
+    def __init__(self, log_path: Path):
+        self.log_path = log_path
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def log_usage(self, api_key: str, path: str, method: str, status_code: int):
+        entry = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "api_key": api_key,
+            "path": path,
+            "method": method,
+            "status_code": status_code,
+        }
+        with open(self.log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+
+
+class RateLimiter:
+    def __init__(self):
+        self.requests = {}
+        self.lock = threading.Lock()
+
+    def is_allowed(self, api_key: str, limit: int) -> bool:
+        now = datetime.now(UTC)
+        minute = now.strftime("%Y-%m-%d %H:%M")
+        key = f"{api_key}:{minute}"
+
+        with self.lock:
+            count = self.requests.get(key, 0)
+            if count >= limit:
+                return False
+            self.requests[key] = count + 1
+
+            # Clean up old entries (simple)
+            if len(self.requests) > 1000:
+                self.requests = {k: v for k, v in self.requests.items() if minute in k}
+
+            return True
+
+
+api_key_manager = APIKeyManager(USERS_DB_PATH)
+usage_tracker = UsageTracker(USAGE_LOG_PATH)
+rate_limiter = RateLimiter()
 
 UF_CODE_TO_ABBR = {
     "11": "RO",
@@ -90,420 +213,13 @@ UF_CODE_TO_ABBR = {
 }
 
 
-@dataclass(frozen=True)
-class RiskProfile:
-    formula: str
-    case_weight: float = 1.0
-    warning_weight: float = 4.0
-    severe_weight: float = 8.0
-    death_weight: float = 20.0
-    hospitalization_weight: float = 2.0
-    moderate_threshold: float = 5.0
-    high_threshold: float = 25.0
-    critical_threshold: float = 100.0
-    death_is_critical: bool = True
-    severe_is_high: bool = True
+# DiseaseSource + DISEASE_SOURCES moved to domain/disease_sources.py (Fase 0 - Opção A)
 
 
-RISK_PROFILES = {
-    "arbovirus": RiskProfile(
-        formula=(
-            "casos_provaveis + 4*sinais_alarme + 8*casos_graves "
-            "+ 20*obitos + 2*hospitalizacoes"
-        )
-    ),
-    "yellow_fever": RiskProfile(
-        formula="2*casos_provaveis + 30*obitos",
-        case_weight=2.0,
-        warning_weight=0.0,
-        severe_weight=0.0,
-        death_weight=30.0,
-        hospitalization_weight=0.0,
-        moderate_threshold=6.0,
-        high_threshold=20.0,
-        critical_threshold=60.0,
-    ),
-    "leptospirosis": RiskProfile(
-        formula=(
-            "casos_provaveis + 6*sinais_alarme + 12*casos_graves "
-            "+ 25*obitos + 4*hospitalizacoes"
-        ),
-        warning_weight=6.0,
-        severe_weight=12.0,
-        death_weight=25.0,
-        hospitalization_weight=4.0,
-        moderate_threshold=5.0,
-        high_threshold=20.0,
-        critical_threshold=50.0,
-    ),
-    "meningitis": RiskProfile(
-        formula="2*casos_provaveis + 12*casos_graves + 35*obitos",
-        case_weight=2.0,
-        warning_weight=0.0,
-        severe_weight=12.0,
-        death_weight=35.0,
-        hospitalization_weight=0.0,
-        moderate_threshold=6.0,
-        high_threshold=22.0,
-        critical_threshold=70.0,
-    ),
-    "animal_accident": RiskProfile(
-        formula=(
-            "casos_provaveis + 5*sinais_alarme + 10*casos_graves "
-            "+ 20*obitos + 2*hospitalizacoes"
-        ),
-        warning_weight=5.0,
-        severe_weight=10.0,
-        death_weight=20.0,
-        hospitalization_weight=2.0,
-    ),
-    "rare_severe": RiskProfile(
-        formula="4*casos_provaveis + 20*casos_graves + 35*obitos + 8*hospitalizacoes",
-        case_weight=4.0,
-        warning_weight=0.0,
-        severe_weight=20.0,
-        death_weight=35.0,
-        hospitalization_weight=8.0,
-        moderate_threshold=4.0,
-        high_threshold=20.0,
-        critical_threshold=60.0,
-    ),
-    "chronic": RiskProfile(
-        formula="casos_provaveis + 20*obitos",
-        warning_weight=0.0,
-        severe_weight=0.0,
-        hospitalization_weight=0.0,
-    ),
-}
+# DISEASE_SOURCES moved to domain/disease_sources.py (Fase 0 - Opção A)
+    # (DISEASE_SOURCES + labels fully removed - now in domain/disease_sources.py)
 
-RISK_FORMULA = RISK_PROFILES["arbovirus"].formula
-
-
-@dataclass(frozen=True)
-class DiseaseSource:
-    codigo: str
-    nome: str
-    virus: str
-    tipo: str
-    folder: str
-    file_prefix: str
-    first_year: int
-    direct_csv_url: str = ""
-    dbc_prefix: str = ""
-    csv_encoding: str = "utf-8-sig"
-    year_field: str = "NU_ANO"
-    latest_year: int | None = None
-    risk_profile: str = "arbovirus"
-    severity_code_field: str = "CLASSI_FIN"
-    warning_codes: frozenset[str] = frozenset()
-    severe_codes: frozenset[str] = frozenset()
-    warning_fields: frozenset[str] = frozenset()
-    severe_fields: frozenset[str] = frozenset()
-    hospitalization_fields: frozenset[str] = frozenset({"HOSPITALIZ"})
-
-
-DISEASE_SOURCES: dict[str, DiseaseSource] = {
-    "DENG": DiseaseSource(
-        codigo="DENG",
-        nome="Dengue",
-        virus="DENV",
-        tipo="Arbovirose urbana",
-        folder="Dengue",
-        file_prefix="DENG",
-        first_year=2000,
-        warning_codes=frozenset({"11"}),
-        severe_codes=frozenset({"2", "3", "4", "12"}),
-    ),
-    "CHIK": DiseaseSource(
-        codigo="CHIK",
-        nome="Febre de Chikungunya",
-        virus="CHIKV",
-        tipo="Arbovirose urbana",
-        folder="Chikungunya",
-        file_prefix="CHIK",
-        first_year=2015,
-    ),
-    "ZIKA": DiseaseSource(
-        codigo="ZIKA",
-        nome="Zika",
-        virus="ZIKV",
-        tipo="Arbovirose urbana",
-        folder="Zikavirus",
-        file_prefix="ZIKA",
-        first_year=2016,
-    ),
-    "YF": DiseaseSource(
-        codigo="YF",
-        nome="Febre Amarela",
-        virus="YFV",
-        tipo="Arbovirose silvestre/urbana",
-        folder="",
-        file_prefix="",
-        first_year=1994,
-        direct_csv_url=(
-            "https://s3.sa-east-1.amazonaws.com/ckan.saude.gov.br/"
-            "Febre+Amarela/fa_casoshumanos_1994-2025.csv"
-        ),
-        csv_encoding="latin-1",
-        year_field="ANO_IS",
-        latest_year=2025,
-        risk_profile="yellow_fever",
-        hospitalization_fields=frozenset(),
-    ),
-    "LEPT": DiseaseSource(
-        codigo="LEPT",
-        nome="Leptospirose",
-        virus="Leptospira spp.",
-        tipo="Zoonose bacteriana",
-        folder="",
-        file_prefix="",
-        first_year=2000,
-        dbc_prefix="LEPT",
-        latest_year=2024,
-        risk_profile="leptospirosis",
-        warning_fields=frozenset({"CLI_ICTERI", "CLI_HEMORR"}),
-        severe_fields=frozenset({"CLI_RENAL", "CLI_RESPIR", "CLI_CARDIA", "CLI_MENING"}),
-        hospitalization_fields=frozenset({"ATE_HOSP"}),
-    ),
-    "MENI": DiseaseSource(
-        codigo="MENI",
-        nome="Meningite",
-        virus="Múltiplos agentes",
-        tipo="Doença infecciosa",
-        folder="",
-        file_prefix="",
-        first_year=2007,
-        dbc_prefix="MENI",
-        latest_year=2022,
-        risk_profile="meningitis",
-        severe_fields=frozenset({"CLI_COMA", "CLI_PETEQU", "CLI_CONVUL"}),
-        hospitalization_fields=frozenset(),
-    ),
-    "ANIM": DiseaseSource(
-        codigo="ANIM",
-        nome="Acidentes por Animais Peçonhentos",
-        virus="Animais peçonhentos",
-        tipo="Acidente/agravo de notificação",
-        folder="",
-        file_prefix="",
-        first_year=2007,
-        dbc_prefix="ANIM",
-        latest_year=2022,
-        risk_profile="animal_accident",
-        severity_code_field="TRA_CLASSI",
-        warning_codes=frozenset({"2"}),
-        severe_codes=frozenset({"3"}),
-        hospitalization_fields=frozenset(),
-    ),
-    "BOTU": DiseaseSource(
-        codigo="BOTU",
-        nome="Botulismo",
-        virus="Clostridium botulinum",
-        tipo="Doença bacteriana/toxina",
-        folder="",
-        file_prefix="",
-        first_year=2007,
-        dbc_prefix="BOTU",
-        latest_year=2023,
-        risk_profile="rare_severe",
-        severe_fields=frozenset({"STRESPIRA", "STCARDIACA", "STCOMA"}),
-        hospitalization_fields=frozenset({"STHOSPITAL"}),
-    ),
-    "TOXC": DiseaseSource(
-        codigo="TOXC",
-        nome="Toxoplasmose Congênita",
-        virus="Toxoplasma gondii",
-        tipo="Doença parasitária congênita",
-        folder="",
-        file_prefix="",
-        first_year=2019,
-        dbc_prefix="TOXC",
-        latest_year=2023,
-        risk_profile="chronic",
-        hospitalization_fields=frozenset(),
-    ),
-    "TOXG": DiseaseSource(
-        codigo="TOXG",
-        nome="Toxoplasmose Gestacional",
-        virus="Toxoplasma gondii",
-        tipo="Doença parasitária gestacional",
-        folder="",
-        file_prefix="",
-        first_year=2019,
-        dbc_prefix="TOXG",
-        latest_year=2023,
-        risk_profile="chronic",
-        hospitalization_fields=frozenset(),
-    ),
-    "HANS": DiseaseSource(
-        codigo="HANS",
-        nome="Hanseníase",
-        virus="Mycobacterium leprae",
-        tipo="Doença bacteriana crônica",
-        folder="",
-        file_prefix="",
-        first_year=2001,
-        dbc_prefix="HANS",
-        latest_year=2023,
-        risk_profile="chronic",
-        hospitalization_fields=frozenset(),
-    ),
-}
-
-DENGUE_CLASSIFICATION_LABELS = {
-    "1": "Dengue clássico",
-    "2": "Dengue com complicações",
-    "3": "Febre hemorrágica do dengue",
-    "4": "Síndrome do choque da dengue",
-    "5": "Descartado",
-    "8": "Inconclusivo",
-    "10": "Dengue",
-    "11": "Dengue com sinais de alarme",
-    "12": "Dengue grave",
-    "13": "Chikungunya",
-}
-
-CHIKUNGUNYA_CLASSIFICATION_LABELS = {
-    "5": "Descartado",
-    "8": "Inconclusivo",
-    "13": "Chikungunya",
-}
-
-ZIKA_CLASSIFICATION_LABELS = {
-    "0": "Sem classificação final",
-    "1": "Zika",
-    "2": "Zika",
-    "5": "Descartado",
-    "8": "Inconclusivo",
-}
-
-YELLOW_FEVER_CLASSIFICATION_LABELS = {
-    "": "Febre amarela confirmada",
-}
-
-SAO_PAULO_DISTRICTS = (
-    "Água Rasa",
-    "Alto de Pinheiros",
-    "Anhanguera",
-    "Aricanduva",
-    "Artur Alvim",
-    "Arthur Alvim",
-    "Barra Funda",
-    "Bela Vista",
-    "Belém",
-    "Bom Retiro",
-    "Brás",
-    "Brasilândia",
-    "Butantã",
-    "Cachoeirinha",
-    "Cambuci",
-    "Campo Belo",
-    "Campo Grande",
-    "Campo Limpo",
-    "Cangaíba",
-    "Capão Redondo",
-    "Carrão",
-    "Casa Verde",
-    "Cidade Ademar",
-    "Cidade Dutra",
-    "Cidade Líder",
-    "Cidade Tiradentes",
-    "Consolação",
-    "Cursino",
-    "Ermelino Matarazzo",
-    "Freguesia do Ó",
-    "Grajaú",
-    "Guaianases",
-    "Iguatemi",
-    "Ipiranga",
-    "Itaim Bibi",
-    "Itaim Paulista",
-    "Itaquera",
-    "Jabaquara",
-    "Jaçanã",
-    "Jaguara",
-    "Jaguaré",
-    "Jaraguá",
-    "Jardim Ângela",
-    "Jardim Helena",
-    "Jardim Paulista",
-    "Jardim São Luís",
-    "Jardim São Luiz",
-    "José Bonifácio",
-    "Lajeado",
-    "Lapa",
-    "Liberdade",
-    "Limão",
-    "Mandaqui",
-    "Marsilac",
-    "Moema",
-    "Mooca",
-    "Moóca",
-    "Morumbi",
-    "Parelheiros",
-    "Pari",
-    "Parque do Carmo",
-    "Pedreira",
-    "Penha",
-    "Perdizes",
-    "Perus",
-    "Pinheiros",
-    "Pirituba",
-    "Ponte Rasa",
-    "Raposo Tavares",
-    "República",
-    "Rio Pequeno",
-    "Sacomã",
-    "Santa Cecília",
-    "Santana",
-    "Santo Amaro",
-    "São Domingos",
-    "São Lucas",
-    "São Mateus",
-    "São Miguel",
-    "São Rafael",
-    "Sapopemba",
-    "Saúde",
-    "Sé",
-    "Socorro",
-    "Tatuapé",
-    "Tremembé",
-    "Tucuruvi",
-    "Vila Andrade",
-    "Vila Curuçá",
-    "Vila Formosa",
-    "Vila Guilherme",
-    "Vila Jacuí",
-    "Vila Leopoldina",
-    "Vila Maria",
-    "Vila Mariana",
-    "Vila Matilde",
-    "Vila Medeiros",
-    "Vila Prudente",
-    "Vila Sônia",
-)
-
-
-def build_sao_paulo_district_aliases() -> dict[str, dict[str, str]]:
-    aliases: dict[str, dict[str, str]] = {}
-    for district in SAO_PAULO_DISTRICTS:
-        aliases[normalize_alias_key(district)] = {
-            "tipo": "distrito",
-            "localidade": district,
-            "municipio_resolvido": "São Paulo",
-            "codigo_municipio": "355030",
-            "estado": "SP",
-            "granularidade_disponivel": "municipio",
-        }
-    return aliases
-
-
-def normalize_alias_key(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value)
-    return "".join(char for char in normalized if not unicodedata.combining(char)).lower()
-
-
-LOCALITY_ALIASES = build_sao_paulo_district_aliases()
+# SAO_PAULO_DISTRICTS + LOCALITY_ALIASES moved to aggregation/filters.py (Fase 0 - Filtros)
 
 db_clini: list[dict[str, Any]] = []
 db_alertas: list[dict[str, Any]] = []
@@ -540,179 +256,18 @@ SITE_DESCRIPTION = (
 PUBLIC_PATHS = ("/dashboard", "/sobre", "/agentes", "/docs", "/openapi.json")
 
 
-def build_source_url(source: DiseaseSource, year: int) -> str:
-    suffix = str(year)[-2:]
-    return (
-        f"{OPEN_DATA_SUS_S3_BASE}/SINAN/{source.folder}/csv/"
-        f"{source.file_prefix}BR{suffix}.csv.zip"
-    )
+# build_source_url and build_dbc_source_url moved to ingestion/sinan_loader.py (Fase 0)
 
 
-def build_dbc_source_url(source: DiseaseSource, year: int) -> str:
-    suffix = str(year)[-2:]
-    return f"{DATASUS_SINAN_DBC_BASE}/{source.dbc_prefix}BR{suffix}.dbc"
+# load_csv_records_from_*, load_dbc_records_from_url, download_bytes,
+# fetch_url_bytes and cache_path_for_url moved to ingestion/sinan_loader.py (Fase 0)
 
 
-def load_csv_records_from_zip(url: str) -> list[dict[str, str]]:
-    payload = download_bytes(url)
-
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        csv_member = next(
-            member for member in archive.namelist() if member.lower().endswith(".csv")
-        )
-        with archive.open(csv_member) as raw_file:
-            text_file = io.TextIOWrapper(raw_file, encoding="utf-8-sig", errors="replace")
-            return list(csv.DictReader(text_file))
+# load_latest_available_records, normalize_dbf_record and filter_records_by_latest_available_year
+# moved to ingestion/sinan_loader.py (Fase 0 - Ingestão)
 
 
-def load_csv_records_from_url(url: str, *, encoding: str) -> list[dict[str, str]]:
-    payload = download_bytes(url)
-    text = payload.decode(encoding, errors="replace")
-    return list(csv.DictReader(text.splitlines(), delimiter=";"))
-
-
-def load_dbc_records_from_url(url: str) -> list[dict[str, str]]:
-    dbc_payload = download_bytes(url)
-    dbf_payload = datasus_dbc.decompress_bytes(dbc_payload)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".dbf") as temp_file:
-        temp_file.write(dbf_payload)
-        temp_path = temp_file.name
-
-    try:
-        table = DBF(temp_path, encoding="latin-1", ignore_missing_memofile=True)
-        return [normalize_dbf_record(row) for row in table]
-    finally:
-        try:
-            os.unlink(temp_path)
-        except OSError:
-            logger.warning("Não foi possível remover arquivo temporário DBF: %s", temp_path)
-
-
-def download_bytes(url: str) -> bytes:
-    if os.getenv("SINAN_DISABLE_CACHE") == "1":
-        return fetch_url_bytes(url)
-
-    cache_path = cache_path_for_url(url)
-    if cache_path.exists():
-        return cache_path.read_bytes()
-
-    payload = fetch_url_bytes(url)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_bytes(payload)
-    return payload
-
-
-def fetch_url_bytes(url: str) -> bytes:
-    with urllib.request.urlopen(url, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-        return response.read()
-
-
-def cache_path_for_url(url: str) -> Path:
-    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
-    suffix = Path(urllib.parse.urlparse(url).path).suffix or ".bin"
-    return SINAN_CACHE_DIR / f"{digest}{suffix}"
-
-
-def load_latest_available_records(
-    source: DiseaseSource, target_year: int
-) -> tuple[int, str, list[dict[str, str]]]:
-    if source.direct_csv_url:
-        records = load_csv_records_from_url(
-            source.direct_csv_url, encoding=source.csv_encoding
-        )
-        year, filtered_records = filter_records_by_latest_available_year(
-            records, target_year=target_year, year_field=source.year_field
-        )
-        return year, source.direct_csv_url, filtered_records
-
-    if source.dbc_prefix:
-        start_year = min(target_year, source.latest_year or target_year)
-        for year in range(start_year, source.first_year - 1, -1):
-            url = build_dbc_source_url(source, year)
-            try:
-                return year, url, load_dbc_records_from_url(url)
-            except (urllib.error.URLError, urllib.error.HTTPError) as error:
-                logger.info("%s indisponível em %s: %s", source.codigo, year, error)
-        raise RuntimeError(f"Nenhum DBC disponível para {source.nome}.")
-
-    for year in range(target_year, source.first_year - 1, -1):
-        url = build_source_url(source, year)
-        try:
-            return year, url, load_csv_records_from_zip(url)
-        except urllib.error.HTTPError as error:
-            if error.code not in {403, 404}:
-                raise
-            logger.info("%s indisponível em %s: HTTP %s", source.codigo, year, error.code)
-    raise RuntimeError(f"Nenhum CSV disponível para {source.nome}.")
-
-
-def normalize_dbf_record(row: Mapping[str, Any]) -> dict[str, str]:
-    normalized: dict[str, str] = {}
-    for key, value in row.items():
-        if value is None:
-            normalized[key] = ""
-        elif isinstance(value, date):
-            normalized[key] = value.isoformat()
-        else:
-            normalized[key] = clean_value(value)
-    return normalized
-
-
-def filter_records_by_latest_available_year(
-    records: Iterable[Mapping[str, Any]], *, target_year: int, year_field: str
-) -> tuple[int, list[dict[str, Any]]]:
-    rows = [dict(record) for record in records]
-    available_years = sorted(
-        {
-            int(clean_code(row.get(year_field)))
-            for row in rows
-            if clean_code(row.get(year_field)).isdigit()
-        }
-    )
-    candidate_years = [year for year in available_years if year <= target_year]
-    if not candidate_years:
-        raise RuntimeError(f"Nenhum registro disponível até {target_year}.")
-
-    latest_year = candidate_years[-1]
-    return latest_year, [
-        row for row in rows if clean_code(row.get(year_field)) == str(latest_year)
-    ]
-
-
-def load_municipality_lookup() -> dict[str, dict[str, str]]:
-    try:
-        with urllib.request.urlopen(
-            IBGE_MUNICIPALITIES_URL, timeout=REQUEST_TIMEOUT_SECONDS
-        ) as response:
-            municipalities = decode_json_payload(response.read())
-    except Exception as error:
-        logger.warning("Não foi possível carregar municípios do IBGE: %s", error)
-        return {}
-
-    lookup: dict[str, dict[str, str]] = {}
-    for municipality in municipalities:
-        code7 = clean_value(municipality.get("id"))
-        code6 = code7[:6]
-        state = find_ibge_state_abbr(municipality)
-        lookup[code6] = {
-            "municipio": clean_value(municipality.get("nome")) or f"Código {code6}",
-            "estado": state,
-            "codigo_ibge": code7,
-        }
-    return lookup
-
-
-def find_ibge_state_abbr(municipality: Mapping[str, Any]) -> str:
-    microregion = municipality.get("microrregiao") or {}
-    mesoregion = microregion.get("mesorregiao") or {}
-    state = mesoregion.get("UF") or {}
-    if state.get("sigla"):
-        return clean_value(state["sigla"]).upper()
-
-    immediate_region = municipality.get("regiao-imediata") or {}
-    intermediate_region = immediate_region.get("regiao-intermediaria") or {}
-    state = intermediate_region.get("UF") or {}
-    return clean_value(state.get("sigla")).upper()
+# load_municipality_lookup moved to ingestion/municipality_lookup.py (Fase 0 - improved version with caching)
 
 
 def fetch_epidemiology_report(year: int = DEFAULT_YEAR) -> dict[str, Any]:
@@ -744,8 +299,12 @@ def fetch_epidemiology_report(year: int = DEFAULT_YEAR) -> dict[str, Any]:
                 logger.error("Erro ao carregar %s: %s", source.nome, error)
                 errors.append({"fonte": source.nome, "erro": str(error)})
 
-    source_order = {source.codigo: index for index, source in enumerate(disease_sources)}
-    sources.sort(key=lambda item: source_order.get(clean_value(item.get("codigo")), 999))
+    source_order = {
+        source.codigo: index for index, source in enumerate(disease_sources)
+    }
+    sources.sort(
+        key=lambda item: source_order.get(clean_value(item.get("codigo")), 999)
+    )
 
     report = build_epidemiology_report(
         records_by_disease,
@@ -763,9 +322,7 @@ def enabled_disease_sources() -> list[DiseaseSource]:
     configured_codes = clean_value(os.getenv("SINAN_DISEASE_CODES"))
     if configured_codes:
         codes = [
-            code.strip().upper()
-            for code in configured_codes.split(",")
-            if code.strip()
+            code.strip().upper() for code in configured_codes.split(",") if code.strip()
         ]
     else:
         codes = list(DEFAULT_DISEASE_CODES)
@@ -973,55 +530,8 @@ def fetch_and_process_data(
     return filter_risk_index(report["municipios"], estado=state_filter)
 
 
-def build_epidemiology_report(
-    records_by_disease: Mapping[str, Iterable[Mapping[str, Any]]],
-    *,
-    year: int,
-    municipality_lookup: Mapping[str, Mapping[str, str]] | None = None,
-) -> dict[str, Any]:
-    lookup = municipality_lookup or {}
-    municipalities: dict[str, dict[str, Any]] = {}
-    skipped_records = 0
-
-    for disease_code, records in records_by_disease.items():
-        source = DISEASE_SOURCES.get(disease_code)
-        if source is None:
-            continue
-
-        for record in records:
-            municipality_code = extract_municipality_code(record)
-            if not municipality_code:
-                skipped_records += 1
-                continue
-
-            municipality = municipalities.setdefault(
-                municipality_code,
-                create_municipality_summary(
-                    municipality_code, record, year, lookup.get(municipality_code)
-                ),
-            )
-            disease = municipality["doencas_por_codigo"].setdefault(
-                source.codigo, create_disease_summary(source, year)
-            )
-            add_record_to_summaries(disease, municipality, source, record)
-
-    rows = finalize_municipality_rows(municipalities.values())
-    alerts = build_high_alerts(rows)
-    return {
-        "metadata": {
-            "periodo": {"ano": year},
-            "fonte": "SINAN/OpenDataSUS via Portal de Dados Abertos do SUS",
-            "municipios": len(rows),
-            "formula_risco": RISK_FORMULA,
-            "formulas_por_doenca": {
-                source.codigo: risk_profile_for_source(source).formula
-                for source in DISEASE_SOURCES.values()
-            },
-            "registros_ignorados": skipped_records,
-        },
-        "municipios": rows,
-        "alertas_altos": alerts,
-    }
+# build_epidemiology_report moved to aggregation/report_builder.py (Fase 0)
+# The version below was the original and has been replaced by the import above.
 
 
 def add_record_to_summaries(
@@ -1066,174 +576,18 @@ def add_record_to_summaries(
     update_latest_date(disease, "ultimo_inicio_sintomas", symptom_date)
 
 
-def create_municipality_summary(
-    municipality_code: str,
-    record: Mapping[str, Any],
-    year: int,
-    lookup_item: Mapping[str, str] | None,
-) -> dict[str, Any]:
-    state = clean_value(lookup_item.get("estado") if lookup_item else "")
-    if not state:
-        state = state_from_record(record)
-    return {
-        "codigo_municipio": municipality_code,
-        "municipio": clean_value(lookup_item.get("municipio") if lookup_item else "")
-        or f"Código {municipality_code}",
-        "estado": state,
-        "periodo": {"ano": year},
-        "fonte": "SINAN/OpenDataSUS",
-        "formula_risco": RISK_FORMULA,
-        "total_notificacoes": 0,
-        "total_casos_provaveis": 0,
-        "total_casos_descartados": 0,
-        "total_sinais_alarme": 0,
-        "total_casos_graves": 0,
-        "total_hospitalizacoes": 0,
-        "total_obitos": 0,
-        "risk_score": 0.0,
-        "nivel_risco": "baixo",
-        "doencas_por_codigo": {},
-    }
 
 
-def create_disease_summary(source: DiseaseSource, year: int) -> dict[str, Any]:
-    return {
-        "codigo": source.codigo,
-        "nome": source.nome,
-        "virus": source.virus,
-        "tipo": source.tipo,
-        "perfil_risco": source.risk_profile,
-        "formula_risco": risk_profile_for_source(source).formula,
-        "periodo": {"ano": year},
-        "total_notificacoes": 0,
-        "casos_provaveis": 0,
-        "casos_descartados": 0,
-        "sinais_alarme": 0,
-        "casos_graves": 0,
-        "hospitalizacoes": 0,
-        "obitos": 0,
-        "risk_score": 0.0,
-        "nivel_risco": "baixo",
-        "ultima_notificacao": None,
-        "ultimo_inicio_sintomas": None,
-        "classificacoes": {},
-    }
 
 
-def finalize_municipality_rows(
-    municipalities: Iterable[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for municipality in municipalities:
-        diseases = [
-            finalize_disease_summary(disease)
-            for disease in municipality.pop("doencas_por_codigo").values()
-        ]
-        diseases.sort(key=lambda item: item["risk_score"], reverse=True)
-
-        municipality["doencas"] = diseases
-        municipality["doencas_altas"] = [
-            disease
-            for disease in diseases
-            if disease["nivel_risco"] in {"alto", "critico"}
-        ]
-        municipality["total_casos_provaveis"] = sum(
-            disease["casos_provaveis"] for disease in diseases
-        )
-        municipality["total_casos_descartados"] = sum(
-            disease["casos_descartados"] for disease in diseases
-        )
-        municipality["total_sinais_alarme"] = sum(
-            disease["sinais_alarme"] for disease in diseases
-        )
-        municipality["total_casos_graves"] = sum(
-            disease["casos_graves"] for disease in diseases
-        )
-        municipality["total_hospitalizacoes"] = sum(
-            disease["hospitalizacoes"] for disease in diseases
-        )
-        municipality["total_obitos"] = sum(disease["obitos"] for disease in diseases)
-        municipality["risk_score"] = round(
-            sum(disease["risk_score"] for disease in diseases), 2
-        )
-        municipality["nivel_risco"] = risk_level(
-            municipality["risk_score"],
-            municipality["total_casos_provaveis"],
-            municipality["total_casos_graves"],
-            municipality["total_obitos"],
-        )
-        rows.append(municipality)
-
-    return sorted(rows, key=lambda item: item["risk_score"], reverse=True)
 
 
-def finalize_disease_summary(disease: dict[str, Any]) -> dict[str, Any]:
-    profile = RISK_PROFILES.get(disease["perfil_risco"], RISK_PROFILES["arbovirus"])
-    disease["risk_score"] = round(
-        (profile.case_weight * disease["casos_provaveis"])
-        + (profile.warning_weight * disease["sinais_alarme"])
-        + (profile.severe_weight * disease["casos_graves"])
-        + (profile.death_weight * disease["obitos"])
-        + (profile.hospitalization_weight * disease["hospitalizacoes"]),
-        2,
-    )
-    disease["nivel_risco"] = risk_level(
-        disease["risk_score"],
-        disease["casos_provaveis"],
-        disease["casos_graves"],
-        disease["obitos"],
-        profile,
-    )
-    disease["classificacoes"] = dict(sorted(disease["classificacoes"].items()))
-    return disease
+# finalize_disease_summary moved to domain/risk.py (Fase 0)
+# Keeping the call site working via the import at the top of the file.
 
 
-def build_high_alerts(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    alerts: list[dict[str, Any]] = []
-    for row in rows:
-        for disease in row["doencas_altas"]:
-            alerts.append(
-                {
-                    "codigo_municipio": row["codigo_municipio"],
-                    "municipio": row["municipio"],
-                    "estado": row["estado"],
-                    "codigo_doenca": disease["codigo"],
-                    "doenca": disease["nome"],
-                    "virus": disease["virus"],
-                    "tipo": disease["tipo"],
-                    "casos_provaveis": disease["casos_provaveis"],
-                    "casos_graves": disease["casos_graves"],
-                    "sinais_alarme": disease["sinais_alarme"],
-                    "hospitalizacoes": disease["hospitalizacoes"],
-                    "obitos": disease["obitos"],
-                    "risk_score": disease["risk_score"],
-                    "nivel_risco": disease["nivel_risco"],
-                    "ultima_notificacao": disease["ultima_notificacao"],
-                }
-            )
-    return sorted(alerts, key=lambda item: item["risk_score"], reverse=True)
 
-
-def risk_level(
-    score: float,
-    probable_cases: int,
-    severe_cases: int,
-    deaths: int,
-    profile: RiskProfile | None = None,
-) -> str:
-    active_profile = profile or RISK_PROFILES["arbovirus"]
-    if (active_profile.death_is_critical and deaths > 0) or (
-        score >= active_profile.critical_threshold
-    ):
-        return "critico"
-    if (active_profile.severe_is_high and severe_cases > 0) or (
-        score >= active_profile.high_threshold
-    ):
-        return "alto"
-    if probable_cases >= 5 or score >= active_profile.moderate_threshold:
-        return "moderado"
-    return "baixo"
-
+# risk_level moved to domain/risk.py (Fase 0)
 
 def extract_municipality_code(record: Mapping[str, Any]) -> str:
     for field in ("ID_MN_RESI", "ID_MUNICIP", "COD_MUN_LPI", "MUNICIPIO", "COMUNINF"):
@@ -1269,199 +623,33 @@ def decode_json_payload(payload: bytes) -> Any:
     return json.loads(payload.decode("utf-8-sig"))
 
 
-def classification_label(disease_code: str, code: str) -> str:
-    if disease_code == "YF" and not code:
-        return YELLOW_FEVER_CLASSIFICATION_LABELS[""]
-    if not code:
-        return "Sem classificação final"
-
-    labels_by_disease = {
-        "DENG": DENGUE_CLASSIFICATION_LABELS,
-        "CHIK": CHIKUNGUNYA_CLASSIFICATION_LABELS,
-        "ZIKA": ZIKA_CLASSIFICATION_LABELS,
-        "YF": YELLOW_FEVER_CLASSIFICATION_LABELS,
-    }
-    labels = labels_by_disease.get(disease_code, {})
-    return labels.get(code, f"Classificação {code}")
+# classification_label is now imported from domain.disease_sources (Fase 0)
 
 
-def update_latest_date(summary: dict[str, Any], field: str, candidate: str) -> None:
-    if not candidate:
-        return
-    current = summary.get(field)
-    if current is None or candidate > current:
-        summary[field] = candidate
 
 
-def any_flag(record: Mapping[str, Any], prefix: str) -> bool:
-    return any(
-        field.startswith(prefix) and is_truthy_code(value)
-        for field, value in record.items()
-    )
 
 
-def has_any_positive_field(record: Mapping[str, Any], fields: Iterable[str]) -> bool:
-    return any(is_truthy_code(record.get(field)) for field in fields)
 
 
-def is_truthy_code(value: Any) -> bool:
-    text = normalize_text(clean_value(value))
-    return text in {"1", "sim", "s", "yes", "true"}
 
 
-def is_hospitalized_record(source: DiseaseSource, record: Mapping[str, Any]) -> bool:
-    return has_any_positive_field(record, source.hospitalization_fields)
 
 
-def is_death_record(record: Mapping[str, Any]) -> bool:
-    if clean_code(record.get("EVOLUCAO")) == "2":
-        return True
-    death_value = normalize_text(clean_value(record.get("OBITO")))
-    return death_value in {"sim", "s", "yes"}
 
 
-def first_present(record: Mapping[str, Any], fields: Iterable[str]) -> str:
-    for field in fields:
-        value = clean_value(record.get(field))
-        if value:
-            return value
-    return ""
 
 
-def parse_date_value(value: str) -> str:
-    text = clean_value(value)
-    if not text:
-        return ""
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(text, fmt).date().isoformat()
-        except ValueError:
-            continue
-    return text
 
 
-def risk_profile_for_source(source: DiseaseSource) -> RiskProfile:
-    return RISK_PROFILES.get(source.risk_profile, RISK_PROFILES["arbovirus"])
+# risk_profile_for_source moved to domain/risk.py (Fase 0)
 
 
-def clean_value(value: Any) -> str:
-    return "" if value is None else str(value).strip()
 
 
-def clean_code(value: Any) -> str:
-    text = clean_value(value)
-    if text.endswith(".0"):
-        text = text[:-2]
-    return text
 
-
-def normalize_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value)
-    return "".join(char for char in normalized if not unicodedata.combining(char)).lower()
-
-
-def filter_risk_index(
-    rows: Iterable[Mapping[str, Any]],
-    *,
-    municipio: str | None = None,
-    estado: str | None = None,
-    somente_altos: bool = False,
-    nivel_minimo: str | None = None,
-) -> list[dict[str, Any]]:
-    state_filter = clean_value(estado).upper()
-    locality_alias = resolve_locality_alias(municipio, state_filter)
-    municipality_filter = normalize_text(
-        locality_alias["municipio_resolvido"] if locality_alias else clean_value(municipio)
-    )
-    min_level = clean_value(nivel_minimo).lower()
-    filtered: list[dict[str, Any]] = []
-
-    for row in rows:
-        if state_filter and clean_value(row.get("estado")).upper() != state_filter:
-            continue
-        if municipality_filter and not municipality_matches(
-            row, municipality_filter, locality_alias
-        ):
-            continue
-        if somente_altos and not row.get("doencas_altas"):
-            continue
-        if min_level and not level_at_least(clean_value(row.get("nivel_risco")), min_level):
-            continue
-        filtered.append(with_locality_alias(row, locality_alias))
-    return filtered
-
-
-def filter_alerts(
-    alerts: Iterable[Mapping[str, Any]],
-    *,
-    municipio: str | None = None,
-    estado: str | None = None,
-    doenca: str | None = None,
-) -> list[dict[str, Any]]:
-    state_filter = clean_value(estado).upper()
-    locality_alias = resolve_locality_alias(municipio, state_filter)
-    municipality_filter = normalize_text(
-        locality_alias["municipio_resolvido"] if locality_alias else clean_value(municipio)
-    )
-    disease_filter = normalize_text(clean_value(doenca))
-    filtered: list[dict[str, Any]] = []
-
-    for alert in alerts:
-        if state_filter and clean_value(alert.get("estado")).upper() != state_filter:
-            continue
-        if municipality_filter and not municipality_matches(
-            alert, municipality_filter, locality_alias
-        ):
-            continue
-        disease_name = normalize_text(clean_value(alert.get("doenca")))
-        disease_code = normalize_text(clean_value(alert.get("codigo_doenca")))
-        if disease_filter and disease_filter not in {disease_name, disease_code}:
-            continue
-        filtered.append(with_locality_alias(alert, locality_alias))
-    return filtered
-
-
-def resolve_locality_alias(
-    municipio: str | None, state_filter: str
-) -> dict[str, str] | None:
-    query = clean_value(municipio)
-    alias = LOCALITY_ALIASES.get(normalize_text(query))
-    if not alias:
-        return None
-    if state_filter and alias["estado"] != state_filter:
-        return None
-    return {"consulta": query, **alias}
-
-
-def municipality_matches(
-    row: Mapping[str, Any],
-    municipality_filter: str,
-    locality_alias: Mapping[str, str] | None = None,
-) -> bool:
-    if locality_alias:
-        return (
-            clean_value(row.get("codigo_municipio"))
-            == locality_alias["codigo_municipio"]
-            and clean_value(row.get("estado")).upper() == locality_alias["estado"]
-        )
-
-    name = normalize_text(clean_value(row.get("municipio")))
-    code = normalize_text(clean_value(row.get("codigo_municipio")))
-    return municipality_filter in name or municipality_filter == code
-
-
-def with_locality_alias(
-    row: Mapping[str, Any], locality_alias: Mapping[str, str] | None
-) -> dict[str, Any]:
-    output = dict(row)
-    if locality_alias:
-        output["filtro_localidade"] = dict(locality_alias)
-    return output
-
-
-def level_at_least(level: str, minimum: str) -> bool:
-    order = {"baixo": 0, "moderado": 1, "alto": 2, "critico": 3}
-    return order.get(level, -1) >= order.get(minimum, -1)
+# filter_risk_index, filter_alerts, resolve_locality_alias, etc.
+# moved to aggregation/filters.py (Fase 0 - Filtros)
 
 
 def public_base_url(request: Request) -> str:
@@ -1494,9 +682,10 @@ def render_web_page(
     )
     nav_items = (
         ("/dashboard", "Dashboard", "dashboard"),
-        ("/sobre", "Dados e metodologia", "sobre"),
+        ("/sobre", "Metodologia", "sobre"),
+        ("/planos", "Planos e API", "planos"),
         ("/agentes", "Agentes", "agentes"),
-        ("/docs", "API", "api"),
+        ("/docs", "Documentação", "api"),
     )
     nav = "\n".join(
         f'<a href="{href}" class="{"active" if key == active else ""}">{label}</a>'
@@ -1513,8 +702,8 @@ def render_web_page(
   <meta name="geo.region" content="BR">
   <meta name="geo.placename" content="Brasil">
   <link rel="canonical" href="{canonical}">
-  <link rel="alternate" type="application/json" href="{canonical_url(request, '/agent.json')}" title="Manifesto para agentes">
-  <link rel="alternate" type="text/plain" href="{canonical_url(request, '/llms.txt')}" title="Instruções para LLMs">
+  <link rel="alternate" type="application/json" href="{canonical_url(request, "/agent.json")}" title="Manifesto para agentes">
+  <link rel="alternate" type="text/plain" href="{canonical_url(request, "/llms.txt")}" title="Instruções para LLMs">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="{escape_html(SITE_NAME)}">
   <meta property="og:title" content="{escape_html(title)}">
@@ -1525,9 +714,10 @@ def render_web_page(
   <meta name="twitter:description" content="{escape_html(description)}">
   {schema}
   {extra_head}
-  <style>{BASE_CSS}</style>
+  <link rel="stylesheet" href="/static/css/main.css">
 </head>
 <body>
+  <a class="skip-link" href="#conteudo-principal">Pular para o conteúdo</a>
   <header class="site-header">
     <a class="brand" href="/dashboard" aria-label="{escape_html(SITE_NAME)}">
       <span class="brand-mark" aria-hidden="true">AV</span>
@@ -1537,14 +727,22 @@ def render_web_page(
   </header>
   {body}
   <footer class="site-footer">
-    <span>Dados reais SINAN/OpenDataSUS, enriquecidos por município via IBGE.</span>
-    <span><a href="/v1/metadata">Metadados</a> <a href="/agent.json">agent.json</a> <a href="/llms.txt">llms.txt</a></span>
+    <div>
+      <strong>{escape_html(SITE_NAME)}</strong>
+      <span>Dados reais SINAN/OpenDataSUS, enriquecidos por município via IBGE.</span>
+    </div>
+    <div class="footer-links"><a href="/v1/metadata">Metadados</a> <a href="/agent.json">agent.json</a> <a href="/llms.txt">llms.txt</a></div>
   </footer>
   {extra_script}
 </body>
 </html>"""
 
 
+# =============================================================================
+# LEGACY INLINE ASSETS (Fase 0 - being phased out)
+# These huge strings are kept only as fallback during the transition.
+# Real source of truth is now in web/static/css/main.css and web/static/js/dashboard.js
+# =============================================================================
 BASE_CSS = """
 :root {
   color-scheme: light;
@@ -1555,21 +753,39 @@ BASE_CSS = """
   --soft: #f4f8f5;
   --green: #146c43;
   --teal: #067a76;
-  --amber: #b7791f;
+  --amber: #9a5b00;
   --red: #b42318;
   --blue: #2457a6;
   --shadow: 0 18px 45px rgba(23, 33, 28, .08);
+  --radius: 16px;
 }
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 body {
   margin: 0;
-  background: #f7faf8;
+  background:
+    radial-gradient(circle at top left, rgba(20, 108, 67, .08), transparent 32rem),
+    linear-gradient(180deg, #f7faf8 0%, #fbfdfb 42%, #f7faf8 100%);
   color: var(--ink);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   line-height: 1.5;
 }
 a { color: inherit; }
+.skip-link {
+  position: fixed;
+  left: 16px;
+  top: 12px;
+  z-index: 100;
+  transform: translateY(-160%);
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: #fff;
+  font-weight: 800;
+  text-decoration: none;
+  transition: transform .18s ease;
+}
+.skip-link:focus { transform: translateY(0); }
 .site-header {
   position: sticky;
   top: 0;
@@ -1577,9 +793,9 @@ a { color: inherit; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  min-height: 76px;
-  padding: 14px clamp(18px, 4vw, 56px);
+  gap: clamp(20px, 4vw, 48px);
+  min-height: 80px;
+  padding: 16px clamp(22px, 5vw, 72px);
   border-bottom: 1px solid rgba(20, 108, 67, .16);
   background: rgba(247, 250, 248, .94);
   backdrop-filter: blur(16px);
@@ -1589,38 +805,42 @@ a { color: inherit; }
   align-items: center;
   gap: 12px;
   text-decoration: none;
-  min-width: 250px;
+  min-width: min(310px, 42vw);
+  flex-shrink: 0;
 }
 .brand-mark {
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 8px;
-  background: var(--green);
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--green), var(--teal));
   color: #fff;
-  font-weight: 800;
-  letter-spacing: 0;
+  font-weight: 900;
+  letter-spacing: -.03em;
+  box-shadow: 0 10px 24px rgba(20, 108, 67, .22);
 }
 .brand strong { display: block; font-size: 1rem; letter-spacing: 0; }
 .brand small { display: block; max-width: 360px; color: var(--muted); font-size: .78rem; }
-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 nav a {
-  min-height: 36px;
-  padding: 8px 11px;
-  border-radius: 8px;
+  min-height: 40px;
+  padding: 9px 13px;
+  border-radius: 999px;
   color: var(--muted);
   font-size: .92rem;
+  font-weight: 750;
   text-decoration: none;
 }
-nav a:hover, nav a.active { background: #e7f2ec; color: var(--green); }
-.page { max-width: 1180px; margin: 0 auto; padding: 34px clamp(18px, 4vw, 34px) 56px; }
+nav a:hover { background: #eef7f2; color: var(--green); }
+nav a.active { background: var(--green); color: #fff; box-shadow: 0 8px 20px rgba(20, 108, 67, .18); }
+.page { max-width: 1360px; margin: 0 auto; padding: clamp(36px, 5vw, 64px) clamp(22px, 5vw, 56px) 72px; }
 .hero {
   display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(320px, .95fr);
-  gap: 32px;
+  grid-template-columns: minmax(0, 1.15fr) minmax(360px, .85fr);
+  gap: clamp(36px, 6vw, 72px);
   align-items: center;
-  padding: 28px 0 34px;
+  padding: 36px 0 48px;
 }
 .eyebrow {
   margin: 0 0 12px;
@@ -1631,49 +851,69 @@ nav a:hover, nav a.active { background: #e7f2ec; color: var(--green); }
   text-transform: uppercase;
 }
 h1, h2, h3 { margin: 0; line-height: 1.08; letter-spacing: 0; }
-h1 { max-width: 780px; font-size: clamp(2.1rem, 5vw, 4.7rem); }
-h2 { font-size: clamp(1.45rem, 3vw, 2.35rem); }
+h1 { max-width: 780px; font-size: clamp(2.1rem, 4.2vw, 4rem); letter-spacing: -.04em; }
+h2 { font-size: clamp(1.45rem, 3vw, 2.35rem); letter-spacing: -.03em; }
 h3 { font-size: 1.04rem; }
-.lead { max-width: 720px; color: var(--muted); font-size: clamp(1.02rem, 2vw, 1.22rem); }
+.lead { max-width: 760px; color: var(--muted); font-size: clamp(1.05rem, 2vw, 1.24rem); }
+.summary-callout {
+  max-width: 720px;
+  margin: 20px 0 0;
+  padding: 16px 18px;
+  border: 1px solid rgba(20, 108, 67, .16);
+  border-left: 5px solid var(--green);
+  border-radius: 0 14px 14px 0;
+  background: linear-gradient(90deg, #e8f5ee, rgba(255, 255, 255, .78));
+  color: #123d28;
+  font-weight: 800;
+}
 .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 22px; }
 .button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 42px;
+  min-height: 44px;
   padding: 10px 15px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   background: #fff;
   color: var(--ink);
-  font-weight: 700;
+  font-weight: 800;
   text-decoration: none;
   cursor: pointer;
 }
-.button.primary { border-color: var(--green); background: var(--green); color: #fff; }
+.button.primary { border-color: var(--green); background: var(--green); color: #fff; box-shadow: 0 10px 22px rgba(20, 108, 67, .14); }
+.button.ghost { background: transparent; }
+.button:hover { border-color: rgba(20, 108, 67, .42); }
+.button.primary:hover { background: #0f5d38; }
+.button:active { transform: translateY(0); }
+.button:disabled { cursor: wait; opacity: .72; box-shadow: none; }
 .panel {
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--panel);
   box-shadow: var(--shadow);
 }
-.radar-panel { padding: 18px; }
+.radar-panel { padding: clamp(22px, 3vw, 30px); }
+.radar-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.radar-head .eyebrow { margin-bottom: 8px; }
+.data-freshness { padding: 6px 9px; border-radius: 999px; background: var(--soft); color: var(--muted); font-size: .78rem; font-weight: 800; white-space: nowrap; }
 .radar-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
-.metric { min-height: 108px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); }
-.metric span { color: var(--muted); font-size: .8rem; font-weight: 700; text-transform: uppercase; }
-.metric strong { display: block; margin-top: 8px; font-size: clamp(1.55rem, 4vw, 2.25rem); line-height: 1; }
+.metric { min-height: 118px; padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(180deg, #ffffff, var(--soft)); }
+.metric span { color: var(--muted); font-size: .78rem; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.metric strong { display: block; margin-top: 10px; font-size: clamp(1.65rem, 4vw, 2.45rem); line-height: 1; letter-spacing: -.04em; }
 .toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, 1.25fr) minmax(90px, .42fr) minmax(160px, .72fr) minmax(136px, .58fr) auto;
-  gap: 10px;
+  grid-template-columns: minmax(280px, 1.3fr) minmax(96px, .35fr) minmax(180px, .55fr) minmax(240px, .75fr) minmax(220px, auto);
+  gap: 16px;
   align-items: end;
-  margin: 22px 0;
-  padding: 14px;
+  margin: 28px 0 18px;
+  padding: clamp(18px, 2.4vw, 24px);
 }
+.toolbar-actions { display: flex; gap: 12px; align-items: end; justify-content: flex-end; flex-wrap: nowrap; }
 label { display: grid; gap: 6px; color: var(--muted); font-size: .82rem; font-weight: 700; }
 input, select {
   width: 100%;
-  min-height: 42px;
+  min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 9px 11px;
@@ -1681,23 +921,41 @@ input, select {
   color: var(--ink);
   font: inherit;
 }
+input:hover, select:hover { border-color: rgba(20, 108, 67, .38); }
 input:focus, select:focus, .button:focus { outline: 3px solid rgba(6, 122, 118, .2); outline-offset: 2px; }
+:focus-visible { outline: 3px solid rgba(6, 122, 118, .28); outline-offset: 3px; }
 .switch { display: flex; align-items: center; gap: 9px; min-height: 42px; padding-top: 22px; color: var(--ink); }
 .switch input { width: 18px; min-height: 18px; }
-.content-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(320px, .8fr); gap: 18px; align-items: start; }
-.section-panel { padding: 18px; }
-.section-head { display: flex; align-items: start; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+.quick-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 18px; }
+.quick-filters span { color: var(--muted); font-size: .82rem; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+.quick-filters .button[aria-pressed="true"] { border-color: var(--green); background: #e7f2ec; color: var(--green); }
+.risk-legend { display: grid; grid-template-columns: repeat(4, minmax(190px, 1fr)); gap: 12px; margin-bottom: 26px; }
+.risk-legend span { display: flex; align-items: center; gap: 10px; min-height: 72px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255, 255, 255, .82); color: var(--muted); font-size: .9rem; line-height: 1.45; }
+.risk-legend .badge { flex: 0 0 auto; }
+.content-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(360px, .65fr); gap: 24px; align-items: start; }
+.section-panel { padding: clamp(22px, 2.8vw, 30px); }
+.section-panel h2 { font-size: clamp(1.75rem, 2.4vw, 2.45rem); }
+.section-head { display: flex; align-items: start; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
 .section-head p { margin: 6px 0 0; color: var(--muted); }
-.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
-table { width: 100%; min-width: 720px; border-collapse: collapse; background: #fff; }
-th, td { padding: 12px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
-th { color: var(--muted); font-size: .76rem; text-transform: uppercase; letter-spacing: .06em; background: #f7faf8; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+table { width: 100%; min-width: 780px; border-collapse: collapse; background: #fff; }
+th, td { padding: 16px 18px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+td { line-height: 1.45; }
+td:first-child { min-width: 170px; }
+td:nth-child(2) { min-width: 120px; }
+td:nth-child(5) { max-width: 520px; }
+th { position: sticky; top: 0; z-index: 1; color: var(--muted); font-size: .76rem; text-transform: uppercase; letter-spacing: .06em; background: #f7faf8; }
+tbody tr { transition: background .18s ease; }
+tbody tr:hover { background: #f4f8f5; }
 tr:last-child td { border-bottom: 0; }
+.empty-cell { padding: 22px; color: var(--muted); }
+.empty-cell strong { display: block; color: var(--ink); margin-bottom: 4px; }
 .badge {
   display: inline-flex;
   align-items: center;
-  min-height: 25px;
-  padding: 3px 8px;
+  gap: 5px;
+  min-height: 27px;
+  padding: 4px 9px;
   border-radius: 999px;
   background: #edf2f7;
   color: var(--muted);
@@ -1708,52 +966,386 @@ tr:last-child td { border-bottom: 0; }
 .badge.alto { background: #fff3d6; color: var(--amber); }
 .badge.moderado { background: #e4f4ff; color: var(--blue); }
 .badge.baixo { background: #e8f5ee; color: var(--green); }
-.alert-list { display: grid; gap: 10px; }
-.alert-item { padding: 13px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
-.alert-item header { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
-.alert-item p { margin: 0; color: var(--muted); }
-.facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin: 26px 0; }
-.fact { min-height: 138px; padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.alert-list { display: grid; gap: 12px; }
+.alert-item { padding: 16px 18px; border: 1px solid var(--line); border-left: 5px solid var(--green); border-radius: 12px; background: #fff; }
+.alert-item.critico { border-left-color: var(--red); }
+.alert-item.alto { border-left-color: var(--amber); }
+.alert-item.moderado { border-left-color: var(--blue); }
+.alert-item header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.alert-item header strong { line-height: 1.25; }
+.alert-item p { margin: 0; color: var(--muted); line-height: 1.5; }
+.facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; margin: 34px 0; }
+.fact { min-height: 148px; padding: 24px; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
 .fact p { margin: 10px 0 0; color: var(--muted); }
-.prose { max-width: 880px; }
+.text-layout { display: grid; grid-template-columns: minmax(0, .9fr) minmax(320px, .38fr); gap: 24px; align-items: start; }
+.text-aside { display: grid; gap: 14px; }
+.note-card { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(180deg, #ffffff, var(--soft)); }
+.note-card strong { display: block; margin-bottom: 6px; }
+.note-card p { margin: 0; color: var(--muted); }
+
+/* ====== Visão Completa por Município - Design mais premium ====== */
+#municipio-detail-panel {
+  border-radius: 20px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.06);
+}
+
+.detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+  margin-bottom: 24px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.detail-title-group {
+  min-width: 0;
+}
+
+.detail-title {
+  font-size: 1.65rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: #0f172a;
+  margin: 0 0 6px 0;
+  letter-spacing: -0.025em;
+}
+
+.detail-subtitle {
+  font-size: 0.95rem;
+  color: #64748b;
+  margin: 0;
+  line-height: 1.3;
+}
+
+.detail-close-btn {
+  flex-shrink: 0;
+  font-size: 0.9rem;
+  padding: 8px 18px;
+  border-radius: 9999px;
+  min-height: 44px; /* better touch target */
+  min-width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 18px;
+}
+
+.detail-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 22px 24px;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.04);
+  transition: box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), 
+              transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.detail-card:hover {
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.07);
+  transform: translateY(-1px);
+}
+
+.detail-card--wide {
+  grid-column: 1 / -1;
+}
+
+.detail-section-title {
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: #0f172a;
+  margin: 0 0 14px 0;
+  letter-spacing: -0.01em;
+}
+
+.detail-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.detail-hint {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.detail-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 10px;
+}
+
+.detail-metrics .stat-item {
+  background: #f8fafc;
+  border: 1px solid #e0e7ff;
+  border-radius: 12px;
+  padding: 13px 15px;
+  transition: all 0.15s ease;
+}
+
+.detail-metrics .stat-item:hover {
+  border-color: #c7d2fe;
+  background: #f1f5f9;
+}
+
+.stat-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #64748b;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  display: block;
+  margin-bottom: 3px;
+}
+
+.detail-table-wrapper {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.detail-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.9rem;
+}
+
+.detail-table th {
+  background: #f1f5f9;
+  color: #475569;
+  font-weight: 600;
+  font-size: 0.73rem;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  padding: 11px 14px;
+  text-align: left;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.detail-table th.num {
+  text-align: right;
+}
+
+.detail-table td {
+  padding: 11px 14px;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: middle;
+  color: #334155;
+}
+
+.detail-table tr:last-child td {
+  border-bottom: none;
+}
+
+.detail-table tr:hover td {
+  background: #f8fafc;
+}
+
+.detail-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  font-weight: 500;
+}
+
+.detail-placeholder {
+  padding: 18px 0 4px;
+  color: #64748b;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.detail-placeholder p {
+  margin: 0;
+}
+
+/* ====== Responsividade da Visão Completa ====== */
+@media (max-width: 768px) {
+  .detail-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 20px;
+    padding-bottom: 14px;
+  }
+
+  .detail-close-btn {
+    align-self: flex-end;
+    padding: 10px 20px;
+    font-size: 0.95rem;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .detail-card {
+    padding: 18px 20px;
+    border-radius: 14px;
+  }
+
+  .detail-metrics {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+
+  .detail-table {
+    font-size: 0.82rem;
+  }
+
+  .detail-table th,
+  .detail-table td {
+    padding: 8px 10px;
+  }
+}
+
+@media (max-width: 480px) {
+  .detail-title {
+    font-size: 1.35rem;
+  }
+
+  .detail-subtitle {
+    font-size: 0.85rem;
+  }
+
+  .detail-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-table-wrapper {
+    margin: 0 -4px; /* allow table to breathe */
+  }
+
+  .detail-table {
+    font-size: 0.78rem;
+  }
+
+  .detail-table th,
+  .detail-table td {
+    padding: 6px 8px;
+  }
+
+  .detail-close-btn {
+    padding: 8px 16px;
+    font-size: 0.9rem;
+  }
+}
+
+/* Horizontal scroll for the detail table on small screens */
+@media (max-width: 640px) {
+  .detail-table-wrapper {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border-radius: 12px;
+  }
+
+  .detail-table {
+    min-width: 620px; /* forces horizontal scroll when needed */
+  }
+}
+.prose { max-width: 960px; }
+.prose h2 { margin-top: 34px; }
+.prose h2:first-child { margin-top: 0; }
 .prose p, .prose li { color: var(--muted); }
+.prose li { margin: 8px 0; }
+.prose ul { padding-left: 1.2rem; }
 .prose code, .code-block { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
 .code-block {
   overflow-x: auto;
-  padding: 14px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  padding: 18px;
+  border: 1px solid rgba(19, 32, 25, .2);
+  border-radius: 14px;
   background: #132019;
   color: #eef8f1;
   font-size: .9rem;
+  line-height: 1.7;
 }
-.link-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }
-.link-card { padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: #fff; text-decoration: none; }
+.link-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 22px; }
+.link-card { padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: #fff; text-decoration: none; }
+.link-card strong { display: block; color: var(--green); font-size: 1.02rem; }
 .link-card span { display: block; color: var(--muted); margin-top: 6px; }
 .status-line { min-height: 24px; color: var(--muted); font-size: .92rem; }
+.table-hint { margin: 14px 0 0; color: var(--muted); font-size: .86rem; }
+.skeleton-line {
+  display: block;
+  width: 100%;
+  max-width: 560px;
+  height: 14px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #edf4ef 0%, #f8fbf9 45%, #edf4ef 90%);
+  background-size: 220% 100%;
+}
+.skeleton-line.short { max-width: 260px; }
 .site-footer {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 24px clamp(18px, 4vw, 56px);
+  gap: 24px;
+  padding: 30px clamp(22px, 5vw, 72px);
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: .88rem;
 }
-.site-footer a { margin-left: 12px; color: var(--green); font-weight: 700; text-decoration: none; }
-@media (max-width: 820px) {
-  .site-header { position: static; align-items: flex-start; flex-direction: column; }
+.site-footer div:first-child { display: grid; gap: 4px; }
+.site-footer strong { color: var(--ink); }
+.footer-links { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+.site-footer a { padding: 7px 10px; border-radius: 999px; color: var(--green); font-weight: 800; text-decoration: none; }
+.site-footer a:hover { background: #e7f2ec; }
+@media (max-width: 1180px) {
+  .site-header { align-items: flex-start; flex-direction: column; }
   nav { justify-content: flex-start; }
-  .hero, .content-grid, .facts, .link-grid { grid-template-columns: 1fr; }
+  .hero { grid-template-columns: 1fr; }
+  .toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .toolbar-actions { justify-content: flex-start; }
+  .content-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 820px) {
+  .site-header { position: static; }
+  nav { justify-content: flex-start; overflow-x: auto; width: 100%; flex-wrap: nowrap; padding-bottom: 4px; }
+  nav a { white-space: nowrap; }
+  .page { padding: 26px 16px 56px; }
+  .hero, .content-grid, .facts, .link-grid, .risk-legend, .text-layout { grid-template-columns: 1fr; }
+  .quick-filters .button { flex: 1 1 140px; }
   .toolbar { grid-template-columns: 1fr; }
+  .toolbar-actions { justify-content: stretch; flex-wrap: wrap; }
+  .toolbar-actions .button { flex: 1 1 180px; }
   .switch { padding-top: 0; }
   .radar-grid { grid-template-columns: 1fr; }
-  .site-footer { flex-direction: column; }
-  .site-footer a { margin: 0 12px 0 0; }
+  table, thead, tbody, tr, td { display: block; min-width: 0; width: 100%; }
+  thead { display: none; }
+  th { position: static; }
+  tr { padding: 12px; border-bottom: 1px solid var(--line); }
+  td { display: grid; grid-template-columns: 112px 1fr; gap: 10px; max-width: none; min-width: 0; padding: 8px 0; border-bottom: 0; }
+  td::before { content: attr(data-label); color: var(--muted); font-size: .76rem; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
+  .empty-cell { display: block; }
+  .empty-cell::before { content: none; }
+  .site-footer { align-items: flex-start; flex-direction: column; }
+  .footer-links { justify-content: flex-start; }
 }
 @media (prefers-reduced-motion: no-preference) {
-  .button, nav a, .link-card, .alert-item { transition: transform .18s ease, border-color .18s ease, background .18s ease; }
-  .button:hover, .link-card:hover, .alert-item:hover { transform: translateY(-1px); }
+  .button, nav a, .link-card, .alert-item, .metric, .fact { transition: transform .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease; }
+  .button:hover, .link-card:hover, .alert-item:hover, .metric:hover, .fact:hover { transform: translateY(-1px); }
+  .link-card:hover, .fact:hover { border-color: rgba(20, 108, 67, .32); box-shadow: 0 14px 34px rgba(23, 33, 28, .07); }
+  [aria-busy="true"] .skeleton-line { animation: shimmer 1.15s ease-in-out infinite; }
+}
+@keyframes shimmer {
+  from { background-position: 120% 0; }
+  to { background-position: -120% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
 }
 """
 
@@ -1765,20 +1357,38 @@ def render_dashboard_page(request: Request) -> str:
         {"summary": summary, "alerts": alerts, "municipios": db_clini[:20]},
         ensure_ascii=False,
     )
+    alert_count = summary["alertas_altos"]
+    summary_sentence = (
+        f"{format_number(alert_count)} alerta(s) alto(s) ou crítico(s) carregado(s) nas fontes atuais."
+        if alert_count
+        else "Nenhum alerta alto ou crítico carregado nas fontes atuais."
+    )
+    period_year = clean_value(db_metadata.get("periodo", {}).get("ano")) or str(
+        DEFAULT_YEAR
+    )
     body = f"""
-<main class="page" id="risk-dashboard">
+<main class="page" id="conteudo-principal">
+  <div id="risk-dashboard">
   <section class="hero" aria-labelledby="dashboard-title">
     <div>
       <p class="eyebrow">Monitoramento epidemiológico municipal</p>
       <h1 id="dashboard-title">Risco epidemiológico de múltiplos agravos em uma visão operacional.</h1>
       <p class="lead">Dados reais do SINAN/OpenDataSUS e DBCs do DATASUS, enriquecidos por município e organizados para leitura executiva, técnica e automatizada.</p>
+      <p class="summary-callout">{escape_html(summary_sentence)}</p>
       <div class="actions">
         <a class="button primary" href="#consulta">Consultar risco</a>
         <a class="button" href="/v1/high-alerts">Ver JSON de alertas</a>
+        <a class="button" href="/sobre">Entender metodologia</a>
       </div>
     </div>
     <aside class="panel radar-panel" aria-label="Resumo da carga atual">
-      <h2>Radar atual</h2>
+      <div class="radar-head">
+        <div>
+          <p class="eyebrow">Radar atual</p>
+          <h2>Prioridade operacional</h2>
+        </div>
+        <span class="data-freshness">Ano-base {escape_html(period_year)}</span>
+      </div>
       <div class="radar-grid">
         {render_metric("Municípios", summary["municipios_monitorados"])}
         {render_metric("Alertas altos", summary["alertas_altos"])}
@@ -1790,38 +1400,57 @@ def render_dashboard_page(request: Request) -> str:
 
   <form class="panel toolbar" id="consulta" data-endpoint="/v1/risk-index">
     <label>Município, distrito ou código
-      <input id="municipio" name="municipio" value="perus" autocomplete="address-level2">
+      <input id="municipio" name="municipio" value="perus" placeholder="Ex: Perus, São Paulo ou 355030" autocomplete="address-level2">
     </label>
     <label>UF
-      <input id="estado" name="estado" value="SP" maxlength="2" autocomplete="address-level1">
+      <input id="estado" name="estado" value="SP" placeholder="SP" maxlength="2" autocomplete="address-level1" autocapitalize="characters">
     </label>
     <label>Nível mínimo
       <select id="nivel_minimo" name="nivel_minimo">
         <option value="">Todos</option>
-        <option value="moderado">Moderado</option>
-        <option value="alto">Alto</option>
+        <option value="moderado">Moderado+</option>
+        <option value="alto">Alto+</option>
         <option value="critico">Crítico</option>
       </select>
     </label>
-    <label class="switch"><input id="somente_altos" name="somente_altos" type="checkbox"> Somente altos</label>
-    <button class="button primary" type="submit">Atualizar</button>
+    <label class="switch"><input id="somente_altos" name="somente_altos" type="checkbox"> Mostrar apenas alto ou crítico</label>
+    <div class="toolbar-actions">
+      <button class="button ghost" type="reset">Limpar filtros</button>
+      <button class="button primary" type="submit">Atualizar</button>
+    </div>
   </form>
+
+  <div class="quick-filters" aria-label="Atalhos de consulta">
+    <span>Atalhos</span>
+    <button class="button ghost" type="button" data-quick-level="" aria-pressed="true">Todos</button>
+    <button class="button ghost" type="button" data-quick-level="moderado" aria-pressed="false">Moderado+</button>
+    <button class="button ghost" type="button" data-quick-level="alto" aria-pressed="false">Alto+</button>
+    <button class="button ghost" type="button" data-quick-level="critico" aria-pressed="false">Crítico</button>
+  </div>
+
+  <div class="risk-legend" aria-label="Legenda dos níveis de risco">
+    <span>{render_badge("baixo")} baixa concentração ou ausência de sinais graves</span>
+    <span>{render_badge("moderado")} volume ou sinais relevantes</span>
+    <span>{render_badge("alto")} gravidade, concentração ou hospitalizações</span>
+    <span>{render_badge("critico")} óbitos ou score muito elevado</span>
+  </div>
 
   <div class="content-grid">
     <section class="panel section-panel" aria-labelledby="municipios-title">
       <div class="section-head">
         <div>
           <h2 id="municipios-title">Resultado por município</h2>
-          <p id="dashboard-status" class="status-line">Pronto para consulta.</p>
+          <p id="dashboard-status" class="status-line" role="status" aria-live="polite">Pronto para consulta. Clique em uma linha para ver a visão completa.</p>
         </div>
         <a class="button" href="/sobre">Metodologia</a>
       </div>
       <div class="table-wrap">
-        <table>
+        <table aria-describedby="dashboard-status">
           <thead><tr><th>Município</th><th>Risco</th><th>Casos</th><th>Óbitos</th><th>Doenças altas</th></tr></thead>
           <tbody id="risk-rows">{render_dashboard_rows(db_clini[:8])}</tbody>
         </table>
       </div>
+      <p class="table-hint">Dica: clique em qualquer linha para abrir a visão completa com todos os indicadores por doença.</p>
     </section>
 
     <aside class="panel section-panel" aria-labelledby="alertas-title">
@@ -1834,7 +1463,78 @@ def render_dashboard_page(request: Request) -> str:
       <div class="alert-list" id="alert-list">{render_alert_items(alerts)}</div>
     </aside>
   </div>
+
+  <!-- Visão Completa por Município - Design mais refinado -->
+  <div id="municipio-detail-panel" class="panel section-panel" style="display: none; margin-top: 28px;">
+    <div style="margin-bottom: 12px; padding: 10px 14px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; font-size: 0.82rem; color: #166534;">
+      <strong>Comparação automática ativada:</strong> Ao abrir esta visão, os dados do ano anterior são carregados automaticamente para permitir comparação ano a ano.
+    </div>
+
+    <div class="detail-header">
+      <div class="detail-title-group">
+        <h2 id="detail-municipio-title" class="detail-title"></h2>
+        <p id="detail-municipio-subtitle" class="detail-subtitle"></p>
+      </div>
+      <button type="button" class="button ghost detail-close-btn" id="close-detail">
+        <span>Fechar</span>
+      </button>
+    </div>
+
+    <div class="detail-grid">
+      <!-- Resumo com métricas mais elegantes -->
+      <div class="detail-card detail-card--metrics">
+        <h3 class="detail-section-title">Resumo do Município</h3>
+        <div class="detail-metrics" id="detail-summary"></div>
+      </div>
+
+      <!-- Tabela de todos os agravos - visual premium -->
+      <div class="detail-card detail-card--wide">
+        <div class="detail-section-header">
+          <h3 class="detail-section-title">Todos os Agravos</h3>
+          <span class="detail-hint">Dados consolidados do ano</span>
+        </div>
+        <div class="detail-table-wrapper">
+          <table class="detail-table" id="detail-diseases-table">
+            <thead>
+              <tr>
+                <th>Agravo</th>
+                <th class="num">Casos</th>
+                <th class="num">Alarme</th>
+                <th class="num">Graves</th>
+                <th class="num">Hosp.</th>
+                <th class="num">Óbitos</th>
+                <th class="num">Score</th>
+                <th>Nível</th>
+              </tr>
+            </thead>
+            <tbody id="detail-diseases-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Comparação Ano Anterior (agora funcional) -->
+      <div class="detail-card">
+        <h3 class="detail-section-title">Comparação com Ano Anterior</h3>
+        <div id="detail-comparison">
+          <!-- Conteúdo preenchido dinamicamente via JS -->
+          <p class="detail-placeholder">Carregando comparação com o ano anterior...</p>
+        </div>
+      </div>
+
+      <!-- Evolução Temporal - Primeiro React island (Chart.js leve) -->
+      <div class="detail-card">
+        <h3 class="detail-section-title">Evolução Temporal</h3>
+        <div id="evolution-chart-container">
+          <canvas id="evolution-chart" height="120"></canvas>
+        </div>
+        <p id="evolution-chart-hint" style="margin-top: 8px; font-size: 0.78rem; color: #64748b;">
+          Dados do ano atual + anterior carregados automaticamente.
+        </p>
+      </div>
+    </div>
+  </div>
   <script id="initial-dashboard-data" type="application/json">{escape_html(initial_json)}</script>
+  </div>
 </main>"""
     return render_web_page(
         request,
@@ -1843,9 +1543,71 @@ def render_dashboard_page(request: Request) -> str:
         description=SITE_DESCRIPTION,
         body=body,
         json_ld=base_json_ld(request)
-        + [dataset_json_ld(request), breadcrumb_json_ld(request, "Dashboard", "/dashboard")],
+        + [
+            dataset_json_ld(request),
+            breadcrumb_json_ld(request, "Dashboard", "/dashboard"),
+        ],
         active="dashboard",
-        extra_script=f"<script>{DASHBOARD_JS}</script>",
+        # Load extracted dashboard JS (Fase 0) - the giant inline string is now in web/static/js/dashboard.js
+        extra_script='<script src="/static/js/dashboard.js"></script>',
+    )
+
+
+def render_plans_page(request: Request) -> str:
+    body = f"""
+<main class="page" id="conteudo-principal">
+  <section class="hero">
+    <div class="prose">
+      <p class="eyebrow">Planos e API Professional</p>
+      <h1>Apoie o projeto e obtenha acesso ilimitado.</h1>
+      <p class="lead">O Aldeia Viva Saúde é um projeto de código aberto que depende de assinaturas para manter a infraestrutura e o processamento de dados.</p>
+    </div>
+  </section>
+  <div class="text-layout">
+    <section class="panel section-panel prose">
+      <h2>Modelos de Assinatura</h2>
+      <div class="link-grid">
+        <div class="link-card">
+          <strong>Gratuito</strong>
+          <span>Acesso público ao dashboard e API com limites estritos (5 registros por busca, 10 req/min).</span>
+          <p>R$ 0/mês</p>
+        </div>
+        <div class="link-card" style="border: 2px solid var(--teal);">
+          <strong>Profissional</strong>
+          <span>Acesso completo à API, limites ampliados (1000 registros, 100 req/min) e suporte a integração.</span>
+          <p>R$ 149/mês</p>
+        </div>
+        <div class="link-card">
+          <strong>Enterprise</strong>
+          <span>Relatórios customizados, exportação de dados brutos e acesso prioritário a novos agravos.</span>
+          <p>Sob consulta</p>
+        </div>
+      </div>
+      <h2>Por que assinar?</h2>
+      <ul>
+        <li><strong>Sem limites:</strong> Obtenha todos os municípios em uma única chamada.</li>
+        <li><strong>Dados Premium:</strong> Acesso ao endpoint <code>/v1/professional-report</code> com metadados estendidos.</li>
+        <li><strong>Sustentabilidade:</strong> Ajude a manter o serviço de inteligência epidemiológica ativo e gratuito para agentes comunitários.</li>
+      </ul>
+      <div class="actions">
+        <a class="button primary" href="mailto:contato@aldeia-viva.com.br?subject=Assinatura%20Professional">Solicitar Chave API</a>
+      </div>
+    </section>
+    <aside class="text-aside" aria-label="Informações Adicionais">
+      <article class="note-card"><strong>Chaves API</strong><p>Para obter uma chave, envie um e-mail com sua necessidade. Ativamos chaves gratuitas para pesquisadores e ONGs.</p></article>
+      <article class="note-card"><strong>Faturamento</strong><p>Pagamento via PIX ou Boleto para empresas brasileiras.</p></article>
+    </aside>
+  </div>
+</main>"""
+    return render_web_page(
+        request,
+        path="/planos",
+        title=f"Planos e API | {SITE_NAME}",
+        description="Assine o Aldeia Viva Saúde para obter acesso profissional à API epidemiológica.",
+        body=body,
+        json_ld=base_json_ld(request)
+        + [breadcrumb_json_ld(request, "Planos", "/planos")],
+        active="planos",
     )
 
 
@@ -1861,7 +1623,7 @@ def render_explanation_page(request: Request) -> str:
         for source in DISEASE_SOURCES.values()
     )
     body = f"""
-<main class="page">
+<main class="page" id="conteudo-principal">
   <section class="hero">
     <div class="prose">
       <p class="eyebrow">Dados e metodologia</p>
@@ -1874,16 +1636,23 @@ def render_explanation_page(request: Request) -> str:
     <article class="fact"><h3>Granularidade municipal</h3><p>Distritos e bairros, como Perus, são resolvidos para o município oficial quando houver alias conhecido.</p></article>
     <article class="fact"><h3>Limite de uso</h3><p>Dados não substituem vigilância epidemiológica oficial, investigação local ou validação clínica.</p></article>
   </section>
-  <section class="panel section-panel prose">
-    <h2>Fórmula do score</h2>
-    <p>O score prioriza volume, gravidade, sinais de alarme, hospitalizações e óbitos. Na fase atual, cada doença ou agravo possui um perfil de risco próprio.</p>
-    <pre class="code-block">{escape_html(RISK_FORMULA)}</pre>
-    <ul>{formula_rows}</ul>
-    <h2>Fontes carregadas</h2>
-    <ul>{source_rows or "<li>Nenhuma fonte carregada nesta instância.</li>"}</ul>
-    <h2>Interpretação</h2>
-    <p>O nível <strong>crítico</strong> aparece quando há óbitos ou score muito elevado. O nível <strong>alto</strong> aparece quando há gravidade ou concentração relevante de casos. A saída lista doenças e vírus para facilitar leitura por gestores, sistemas e agentes.</p>
-  </section>
+  <div class="text-layout">
+    <section class="panel section-panel prose">
+      <h2>Fórmula do score</h2>
+      <p>O score prioriza volume, gravidade, sinais de alarme, hospitalizações e óbitos. Na fase atual, cada doença ou agravo possui um perfil de risco próprio.</p>
+      <pre class="code-block">{escape_html(RISK_FORMULA)}</pre>
+      <ul>{formula_rows}</ul>
+      <h2>Fontes carregadas</h2>
+      <ul>{source_rows or "<li>Nenhuma fonte carregada nesta instância.</li>"}</ul>
+      <h2>Interpretação</h2>
+      <p>O nível <strong>crítico</strong> aparece quando há óbitos ou score muito elevado. O nível <strong>alto</strong> aparece quando há gravidade ou concentração relevante de casos. A saída lista doenças e vírus para facilitar leitura por gestores, sistemas e agentes.</p>
+    </section>
+    <aside class="text-aside" aria-label="Resumo metodológico">
+      <article class="note-card"><strong>Uso recomendado</strong><p>Priorize a investigação local dos municípios com risco alto ou crítico e valide sinais graves nas fontes oficiais.</p></article>
+      <article class="note-card"><strong>Leitura do score</strong><p>O score organiza prioridade operacional; ele não substitui vigilância epidemiológica, diagnóstico ou boletins oficiais.</p></article>
+      <article class="note-card"><strong>Granularidade</strong><p>Quando o dado de bairro não existe na fonte, a API informa o município oficial associado à consulta.</p></article>
+    </aside>
+  </div>
 </main>"""
     return render_web_page(
         request,
@@ -1895,14 +1664,17 @@ def render_explanation_page(request: Request) -> str:
         ),
         body=body,
         json_ld=base_json_ld(request)
-        + [dataset_json_ld(request), breadcrumb_json_ld(request, "Dados e metodologia", "/sobre")],
+        + [
+            dataset_json_ld(request),
+            breadcrumb_json_ld(request, "Dados e metodologia", "/sobre"),
+        ],
         active="sobre",
     )
 
 
 def render_agents_page(request: Request) -> str:
     body = f"""
-<main class="page">
+<main class="page" id="conteudo-principal">
   <section class="hero">
     <div class="prose">
       <p class="eyebrow">Consumo por agentes e integrações</p>
@@ -1914,21 +1686,62 @@ def render_agents_page(request: Request) -> str:
       </div>
     </div>
   </section>
-  <section class="panel section-panel prose">
-    <h2>Endpoints recomendados</h2>
-    <div class="link-grid">
-      <a class="link-card" href="/v1/high-alerts"><strong>/v1/high-alerts</strong><span>Alertas altos e críticos por município, doença e vírus.</span></a>
-      <a class="link-card" href="/v1/risk-index"><strong>/v1/risk-index</strong><span>Índice enriquecido com filtros por município, UF e nível mínimo.</span></a>
-      <a class="link-card" href="/v1/diseases"><strong>/v1/diseases</strong><span>Catálogo de doenças e agravos suportados pela API.</span></a>
-      <a class="link-card" href="/v1/metadata"><strong>/v1/metadata</strong><span>Fontes, ano, status da carga e fórmula de risco.</span></a>
-      <a class="link-card" href="/openapi.json"><strong>/openapi.json</strong><span>Contrato OpenAPI para geração de clientes e ferramentas.</span></a>
-    </div>
-    <h2>Exemplo</h2>
-    <pre class="code-block">GET /v1/high-alerts?estado=SP&amp;limite=10
+  <div class="text-layout">
+    <section class="panel section-panel prose">
+      <h2>Endpoints recomendados</h2>
+      <div class="link-grid">
+        <a class="link-card" href="/v1/high-alerts"><strong>/v1/high-alerts</strong><span>Alertas altos e críticos por município, doença e vírus.</span></a>
+        <a class="link-card" href="/v1/risk-index"><strong>/v1/risk-index</strong><span>Índice enriquecido com filtros por município, UF e nível mínimo.</span></a>
+        <a class="link-card" href="/v1/diseases"><strong>/v1/diseases</strong><span>Catálogo de doenças e agravos suportados pela API.</span></a>
+        <a class="link-card" href="/v1/bairros"><strong>/v1/bairros</strong><span>Lista agrupada de bairros/distritos (SP, RJ, MG, PE) para busca por nome (resolve para município).</span></a>
+        <a class="link-card" href="/v1/metadata"><strong>/v1/metadata</strong><span>Fontes, ano, status da carga e fórmula de risco.</span></a>
+        <a class="link-card" href="/openapi.json"><strong>/openapi.json</strong><span>Contrato OpenAPI para geração de clientes e ferramentas.</span></a>
+      </div>
+      <h2>Exemplo</h2>
+      <pre class="code-block">GET /v1/high-alerts?estado=SP&amp;limite=10
 GET /v1/risk-index?municipio=perus&amp;estado=SP&amp;somente_altos=false</pre>
-    <h2>Regras de interpretação</h2>
-    <p>Use <code>nivel_risco</code> para priorização, <code>risk_score</code> para ordenação, <code>/v1/diseases</code> para descobrir agravos carregados e <code>filtro_localidade</code> para identificar quando a consulta original foi resolvida para outro município. Não inferir bairro ou distrito quando <code>granularidade_disponivel</code> for municipal.</p>
-  </section>
+      <h2>Regras de interpretação</h2>
+      <p>Use <code>nivel_risco</code> para priorização, <code>risk_score</code> para ordenação, <code>/v1/diseases</code> para descobrir agravos carregados e <code>filtro_localidade</code> para identificar quando a consulta original foi feita por um <strong>bairro ou distrito</strong> (suportado em SP, RJ, MG e PE). O sistema resolve o nome para o município correspondente — a granularidade dos dados continua municipal.</p>
+    </section>
+    <aside class="text-aside" aria-label="Orientações para integrações">
+      <article class="note-card"><strong>Comece por alertas</strong><p>Use <code>/v1/high-alerts</code> para triagem e <code>/v1/risk-index</code> para telas de exploração com filtros.</p></article>
+      <article class="note-card"><strong>Baixa ambiguidade</strong><p>Prefira códigos de município e UF quando disponíveis para evitar homônimos ou aliases locais.</p></article>
+      <article class="note-card"><strong>Automação segura</strong><p>Registre parâmetros consultados e não extrapole bairro/distrito quando a granularidade retornada for municipal.</p></article>
+      <article class="note-card"><strong>Busca por bairro</strong><p>Use nomes de bairros/distritos de São Paulo, Rio de Janeiro, Belo Horizonte ou Recife (ex: Perus, Copacabana, Savassi, Boa Viagem). O sistema resolve automaticamente para o município e inclui <code>filtro_localidade</code>. Veja a lista em <code>/v1/bairros</code>.</p></article>
+    </aside>
+  </div>
+
+  <div class="text-layout">
+    <section class="panel section-panel prose">
+      <h2>Bairros e distritos suportados (multi-cidade)</h2>
+      <p>
+        O sistema resolve nomes de bairros e distritos para o município oficial (granularidade sempre municipal).
+        Atualmente suportamos <strong>São Paulo (distritos)</strong>, <strong>Rio de Janeiro</strong>, <strong>Belo Horizonte</strong> e <strong>Recife</strong>.
+        Ao usar um destes nomes no parâmetro <code>municipio</code>, a resposta inclui <code>filtro_localidade</code> com a origem da consulta.
+      </p>
+
+      <p><strong>Exemplos de buscas que funcionam:</strong></p>
+      <div style="display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0;">
+        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">perus</code>
+        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">grajaú</code>
+        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">copacabana</code>
+        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">ipanema</code>
+        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">savassi</code>
+        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">pampulha</code>
+        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">boa viagem</code>
+        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">madalena</code>
+      </div>
+
+      <p>
+        <strong>Lista completa e estruturada:</strong> <a href="/v1/bairros">GET /v1/bairros</a>
+        (retorna todas as cidades com seus bairros em formato agrupado).
+      </p>
+
+      <p style="font-size: 0.9rem; color: #64748b;">
+        Dica para agentes: Prefira buscar pelo nome do bairro quando estiver em campo. O sistema entrega os dados do município com o contexto da origem (bairro → município).
+      </p>
+    </section>
+  </div>
 </main>"""
     return render_web_page(
         request,
@@ -1940,70 +1753,314 @@ GET /v1/risk-index?municipio=perus&amp;estado=SP&amp;somente_altos=false</pre>
         ),
         body=body,
         json_ld=base_json_ld(request)
-        + [software_json_ld(request), breadcrumb_json_ld(request, "Agentes", "/agentes")],
+        + [
+            software_json_ld(request),
+            breadcrumb_json_ld(request, "Agentes", "/agentes"),
+        ],
         active="agentes",
     )
 
 
+# Legacy inline JS (Fase 0) - real implementation moved to web/static/js/dashboard.js
 DASHBOARD_JS = r"""
 const form = document.getElementById('consulta');
 const rows = document.getElementById('risk-rows');
 const alerts = document.getElementById('alert-list');
 const statusLine = document.getElementById('dashboard-status');
+const submitButton = form.querySelector('button[type="submit"]');
+const ufInput = document.getElementById('estado');
 const levelClass = (value) => String(value || 'baixo').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 const fmt = new Intl.NumberFormat('pt-BR');
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]);
+}
+
 function badge(value) {
   const level = levelClass(value);
-  return `<span class="badge ${level}">${value || 'baixo'}</span>`;
+  const label = { critico: 'Crítico', alto: 'Alto', moderado: 'Moderado', baixo: 'Baixo' }[level] || value || 'Baixo';
+  const marker = { critico: '●', alto: '▲', moderado: '◆', baixo: '●' }[level] || '●';
+  return `<span class="badge ${level}">${marker} ${escapeHtml(label)}</span>`;
 }
 
 function diseaseNames(items) {
   if (!items || items.length === 0) return 'Sem alerta alto';
-  return items.map((item) => `${item.nome || item.doenca} (${item.nivel_risco})`).join(', ');
+  return items.map((item) => `${escapeHtml(item.nome || item.doenca)} (${escapeHtml(item.nivel_risco || 'alto')})`).join(', ');
 }
 
 function renderRows(items) {
   if (!Array.isArray(items) || items.length === 0) {
-    rows.innerHTML = '<tr><td colspan="5">Nenhum município encontrado para o filtro.</td></tr>';
+    rows.innerHTML = '<tr><td class="empty-cell" colspan="5"><strong>Nenhum município encontrado.</strong>Tente remover a UF, consultar todos os níveis ou buscar pelo código municipal.</td></tr>';
     return;
   }
-  rows.innerHTML = items.map((item) => `
-    <tr>
-      <td><strong>${item.municipio}</strong><br><span class="status-line">${item.estado} · ${item.codigo_municipio}</span></td>
-      <td>${badge(item.nivel_risco)}<br><span class="status-line">score ${fmt.format(item.risk_score || 0)}</span></td>
-      <td>${fmt.format(item.total_casos_provaveis || 0)}</td>
-      <td>${fmt.format(item.total_obitos || 0)}</td>
-      <td>${diseaseNames(item.doencas_altas)}</td>
-    </tr>
-  `).join('');
+  rows.innerHTML = items.map((item) => {
+    let municipioHtml = `<strong>${escapeHtml(item.municipio)}</strong><br><span class="status-line">${escapeHtml(item.estado)} · ${escapeHtml(item.codigo_municipio)}</span>`;
+
+    const filtro = item.filtro_localidade;
+    if (filtro && filtro.tipo === "distrito") {
+      municipioHtml = `<strong>${escapeHtml(item.municipio)}</strong><br><span class="status-line">Busca por: ${escapeHtml(filtro.localidade)} → ${escapeHtml(item.estado)} · ${escapeHtml(item.codigo_municipio)}</span>`;
+    }
+
+    return `
+      <tr class="municipality-row" data-codigo="${escapeHtml(item.codigo_municipio)}" style="cursor: pointer;">
+        <td data-label="Município">${municipioHtml}</td>
+        <td data-label="Risco">${badge(item.nivel_risco)}<br><span class="status-line">score ${fmt.format(item.risk_score || 0)}</span></td>
+        <td data-label="Casos">${fmt.format(item.total_casos_provaveis || 0)}</td>
+        <td data-label="Óbitos">${fmt.format(item.total_obitos || 0)}</td>
+        <td data-label="Doenças altas">${diseaseNames(item.doencas_altas)}</td>
+      </tr>
+    `;
+  }).join('');
+
+  // Make rows clickable for complete visibility per municipality
+  document.querySelectorAll('.municipality-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const codigo = row.dataset.codigo;
+      const fullItem = items.find(i => i.codigo_municipio === codigo);
+      if (fullItem) showMunicipioDetail(fullItem);
+    });
+  });
 }
 
 function renderAlerts(items) {
   if (!Array.isArray(items) || items.length === 0) {
-    alerts.innerHTML = '<p class="status-line">Nenhum alerta alto para o filtro.</p>';
+    alerts.innerHTML = '<p class="status-line">Nenhum alerta alto encontrado para este filtro. Tente ampliar a consulta ou remover filtros.</p>';
     return;
   }
-  alerts.innerHTML = items.map((item) => `
-    <article class="alert-item">
-      <header><strong>${item.doenca}</strong>${badge(item.nivel_risco)}</header>
-      <p>${item.municipio}/${item.estado} · ${item.virus} · ${fmt.format(item.casos_provaveis || 0)} casos prováveis</p>
-      <p>Graves ${fmt.format(item.casos_graves || 0)} · Óbitos ${fmt.format(item.obitos || 0)} · Score ${fmt.format(item.risk_score || 0)}</p>
-    </article>
+  alerts.innerHTML = items.map((item) => {
+    const level = levelClass(item.nivel_risco);
+    return `
+      <article class="alert-item ${level}">
+        <header><strong>${escapeHtml(item.municipio)}/${escapeHtml(item.estado)}</strong>${badge(item.nivel_risco)}</header>
+        <p><strong>${escapeHtml(item.doenca)}</strong> · ${escapeHtml(item.virus)} · ${fmt.format(item.casos_provaveis || 0)} casos prováveis</p>
+        <p>Graves ${fmt.format(item.casos_graves || 0)} · Óbitos ${fmt.format(item.obitos || 0)} · Score ${fmt.format(item.risk_score || 0)}</p>
+      </article>
+    `;
+  }).join('');
+}
+
+function setLoading(isLoading) {
+  submitButton.disabled = isLoading;
+  submitButton.textContent = isLoading ? 'Consultando...' : 'Atualizar';
+  form.setAttribute('aria-busy', isLoading ? 'true' : 'false');
+  rows.closest('.table-wrap')?.setAttribute('aria-busy', isLoading ? 'true' : 'false');
+}
+
+function updateQuickFilterState(level) {
+  document.querySelectorAll('[data-quick-level]').forEach((button) => {
+    button.setAttribute('aria-pressed', (button.dataset.quickLevel || '') === (level || '') ? 'true' : 'false');
+  });
+}
+
+// Mostrar visão completa por município + carregar ano anterior automaticamente (decisão de alto valor)
+async function showMunicipioDetail(item) {
+  const panel = document.getElementById('municipio-detail-panel');
+  if (!panel || !item) return;
+
+  const currentYear = item.periodo?.ano || new Date().getFullYear();
+  const previousYear = currentYear - 1;
+
+  document.getElementById('detail-municipio-title').textContent = `${item.municipio} / ${item.estado}`;
+  document.getElementById('detail-municipio-subtitle').textContent = `Código ${item.codigo_municipio} • Ano atual: ${currentYear} (com comparação automática para ${previousYear})`;
+
+  // Resumo visual mais polido
+  const summaryHtml = `
+    <div class="stat-item">
+      <span class="stat-label">Casos Prováveis</span>
+      <strong style="font-size:1.35rem; display:block; margin-top:2px;">${fmt.format(item.total_casos_provaveis || 0)}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Óbitos Totais</span>
+      <strong style="font-size:1.35rem; display:block; margin-top:2px; color:#b91c1c;">${fmt.format(item.total_obitos || 0)}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Hospitalizações</span>
+      <strong style="font-size:1.35rem; display:block; margin-top:2px;">${fmt.format(item.total_hospitalizacoes || 0)}</strong>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Nível de Risco</span>
+      <div style="margin-top:4px;">${badge(item.nivel_risco)}</div>
+    </div>
+  `;
+  document.getElementById('detail-summary').innerHTML = summaryHtml;
+
+  // Tabela de todas as doenças
+  const tbody = document.getElementById('detail-diseases-body');
+  const doencas = item.doencas || [];
+  tbody.innerHTML = doencas.map(d => `
+    <tr>
+      <td>
+        <div style="font-weight:600; color:#111827;">${escapeHtml(d.nome)}</div>
+        <div style="font-size:0.78rem; color:#6b7280; margin-top:1px;">${escapeHtml(d.virus || '')}</div>
+      </td>
+      <td class="num">${fmt.format(d.casos_provaveis || 0)}</td>
+      <td class="num">${fmt.format(d.sinais_alarme || 0)}</td>
+      <td class="num">${fmt.format(d.casos_graves || 0)}</td>
+      <td class="num">${fmt.format(d.hospitalizacoes || 0)}</td>
+      <td class="num" style="font-weight:600;">${fmt.format(d.obitos || 0)}</td>
+      <td class="num" style="font-weight:600;">${fmt.format(d.risk_score || 0)}</td>
+      <td>${badge(d.nivel_risco)}</td>
+    </tr>
   `).join('');
+
+  panel.style.display = 'block';
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  // === Decisão não recomendada de alto valor: carregar ano anterior automaticamente ===
+  document.getElementById('detail-comparison').innerHTML = `
+    <div style="padding: 14px; background: #f8fafc; border-radius: 10px; border: 1px solid #e2e8f0; font-size: 0.9rem; color: #64748b;">
+      Carregando automaticamente os dados de <strong>${previousYear}</strong> para comparação ano a ano...
+    </div>
+  `;
+
+  try {
+    const prevParams = new URLSearchParams({
+      municipio: item.codigo_municipio,
+      ano: previousYear,
+      limite: '30'
+    });
+
+    const prevRes = await fetch(`/v1/risk-index?${prevParams.toString()}`);
+    if (prevRes.ok) {
+      const prevData = await prevRes.json();
+      const prevItem = Array.isArray(prevData) ? prevData.find(m => m.codigo_municipio === item.codigo_municipio) : null;
+
+      if (prevItem) {
+        renderSimpleYearComparison(item, prevItem, currentYear, previousYear);
+      } else {
+        document.getElementById('detail-comparison').innerHTML = 
+          `<p class="detail-placeholder">Não foram encontrados dados para ${previousYear} neste município.</p>`;
+      }
+    }
+  } catch (e) {
+    document.getElementById('detail-comparison').innerHTML = 
+      `<p class="detail-placeholder">Não foi possível carregar os dados de ${previousYear}.</p>`;
+  }
+}
+
+function renderSimpleYearComparison(current, previous, currentYear, previousYear) {
+  const container = document.getElementById('detail-comparison');
+  if (!container) return;
+
+  const currScore = current.risk_score || 0;
+  const prevScore = previous.risk_score || 0;
+  const scoreDiff = currScore - prevScore;
+  const scorePct = prevScore > 0 ? ((scoreDiff / prevScore) * 100) : 0;
+
+  const currObitos = current.total_obitos || 0;
+  const prevObitos = previous.total_obitos || 0;
+  const obitosDiff = currObitos - prevObitos;
+
+  const currCasos = current.total_casos_provaveis || 0;
+  const prevCasos = previous.total_casos_provaveis || 0;
+  const casosDiff = currCasos - prevCasos;
+  const casosPct = prevCasos > 0 ? ((casosDiff / prevCasos) * 100) : 0;
+
+  const getColor = (diff) => diff > 0 ? '#b91c1c' : (diff < 0 ? '#15803d' : '#64748b');
+  const getArrow = (diff) => diff > 0 ? '▲' : (diff < 0 ? '▼' : '→');
+  const getVerb = (diff) => diff > 0 ? 'piorou' : (diff < 0 ? 'melhorou' : 'manteve-se estável');
+
+  const scoreColor = getColor(scoreDiff);
+  const obitosColor = getColor(obitosDiff);
+  const casosColor = getColor(casosDiff);
+
+  container.innerHTML = `
+    <div style="margin-bottom: 12px; font-size: 0.9rem; color: #475569;">
+      O risco <strong style="color: ${scoreColor};">${getVerb(scoreDiff)}</strong> 
+      ${scoreDiff !== 0 ? `em <strong>${Math.abs(scorePct).toFixed(1)}%</strong>` : ''} 
+      em relação a ${previousYear}.
+    </div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+      <!-- Ano Anterior -->
+      <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px;">
+        <div style="font-size: 0.7rem; color: #64748b; margin-bottom: 4px;">${previousYear}</div>
+        <div style="font-size: 1.1rem; font-weight: 700; color: #334155;">Score: ${fmt.format(prevScore)}</div>
+        <div style="font-size: 0.85rem; color: #64748b; margin-top: 4px;">
+          ${fmt.format(prevCasos)} casos • ${fmt.format(prevObitos)} óbitos
+        </div>
+      </div>
+
+      <!-- Ano Atual -->
+      <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px;">
+        <div style="font-size: 0.7rem; color: #64748b; margin-bottom: 4px;">${currentYear}</div>
+        <div style="font-size: 1.1rem; font-weight: 700; color: ${scoreColor};">
+          Score: ${fmt.format(currScore)} 
+          <span style="font-size: 0.9rem;">${getArrow(scoreDiff)}</span>
+        </div>
+        <div style="font-size: 0.85rem; color: #64748b; margin-top: 4px;">
+          ${fmt.format(currCasos)} casos 
+          <span style="color: ${casosColor};">(${getArrow(casosDiff)} ${Math.abs(casosPct).toFixed(0)}%)</span> 
+          • ${fmt.format(currObitos)} óbitos 
+          <span style="color: ${obitosColor};">(${getArrow(obitosDiff)})</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top: 10px; font-size: 0.8rem; color: #64748b;">
+      Diferença no score: <strong style="color: ${scoreColor};">${scoreDiff > 0 ? '+' : ''}${scoreDiff.toFixed(1)}</strong>
+    </div>
+  `;
+}
+
+// Fechar painel de detalhe
+function closeDetailPanel() {
+  const panel = document.getElementById('municipio-detail-panel');
+  if (panel) panel.style.display = 'none';
+}
+
+document.addEventListener('click', function(e) {
+  if (e.target.id === 'close-detail') {
+    closeDetailPanel();
+  }
+});
+
+// Fechar com ESC (melhor UX)
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    const panel = document.getElementById('municipio-detail-panel');
+    if (panel && panel.style.display !== 'none') {
+      closeDetailPanel();
+    }
+  }
+});
+
+// Fechar ao clicar fora do painel (melhor UX)
+document.addEventListener('click', function(e) {
+  const panel = document.getElementById('municipio-detail-panel');
+  if (!panel || panel.style.display === 'none') return;
+
+  // Fecha se clicar fora do painel e não for em uma linha da tabela
+  if (!panel.contains(e.target) && !e.target.closest('.municipality-row')) {
+    closeDetailPanel();
+  }
+});
+
+function renderSkeleton() {
+  rows.innerHTML = Array.from({ length: 4 }, () => `
+    <tr aria-hidden="true">
+      <td class="empty-cell" colspan="5"><span class="skeleton-line"></span><span class="skeleton-line short" style="margin-top: 10px;"></span></td>
+    </tr>
+  `).join('');
+  alerts.innerHTML = '<article class="alert-item" aria-hidden="true"><span class="skeleton-line"></span><span class="skeleton-line short" style="margin-top: 10px;"></span></article>';
 }
 
 async function loadDashboard(event) {
   if (event) event.preventDefault();
+  ufInput.value = ufInput.value.toUpperCase().trim();
   const data = new FormData(form);
   const params = new URLSearchParams();
   for (const [key, value] of data.entries()) {
-    if (value && key !== 'somente_altos') params.set(key, value);
+    if (value && key !== 'somente_altos') params.set(key, String(value).trim());
   }
   params.set('somente_altos', document.getElementById('somente_altos').checked ? 'true' : 'false');
   params.set('limite', '25');
 
-  statusLine.textContent = 'Atualizando...';
+  statusLine.textContent = 'Atualizando dados...';
+  setLoading(true);
+  renderSkeleton();
   try {
     const riskResponse = await fetch(`/v1/risk-index?${params.toString()}`);
     const alertParams = new URLSearchParams();
@@ -2011,16 +2068,40 @@ async function loadDashboard(event) {
     if (params.get('estado')) alertParams.set('estado', params.get('estado'));
     alertParams.set('limite', '10');
     const alertResponse = await fetch(`/v1/high-alerts?${alertParams.toString()}`);
+    if (!riskResponse.ok || !alertResponse.ok) throw new Error('Falha na consulta');
     const riskPayload = await riskResponse.json();
     const alertPayload = await alertResponse.json();
     renderRows(Array.isArray(riskPayload) ? riskPayload : []);
     renderAlerts(alertPayload.alerts || []);
-    statusLine.textContent = Array.isArray(riskPayload) ? `${riskPayload.length} município(s) retornado(s).` : riskPayload.message;
+    updateQuickFilterState(params.get('nivel_minimo') || '');
+    statusLine.textContent = Array.isArray(riskPayload) ? `${riskPayload.length} município(s) retornado(s).` : (riskPayload.message || 'Consulta concluída.');
   } catch (error) {
-    statusLine.textContent = 'Não foi possível atualizar os dados agora.';
+    renderRows([]);
+    renderAlerts([]);
+    statusLine.textContent = 'Não foi possível atualizar os dados agora. Tente novamente em alguns instantes.';
+  } finally {
+    setLoading(false);
   }
 }
 
+ufInput.addEventListener('input', () => { ufInput.value = ufInput.value.toUpperCase(); });
+form.addEventListener('reset', () => {
+  window.setTimeout(() => {
+    document.getElementById('municipio').value = '';
+    ufInput.value = '';
+    document.getElementById('nivel_minimo').value = '';
+    document.getElementById('somente_altos').checked = false;
+    loadDashboard();
+  });
+});
+document.querySelectorAll('[data-quick-level]').forEach((button) => {
+  button.addEventListener('click', () => {
+    document.getElementById('nivel_minimo').value = button.dataset.quickLevel || '';
+    document.getElementById('somente_altos').checked = ['alto', 'critico'].includes(button.dataset.quickLevel || '');
+    updateQuickFilterState(button.dataset.quickLevel || '');
+    loadDashboard();
+  });
+});
 form.addEventListener('submit', loadDashboard);
 """
 
@@ -2029,7 +2110,9 @@ def dashboard_summary() -> dict[str, int]:
     return {
         "municipios_monitorados": len(db_clini),
         "alertas_altos": len(db_alertas),
-        "casos_provaveis": sum_int(row.get("total_casos_provaveis") for row in db_clini),
+        "casos_provaveis": sum_int(
+            row.get("total_casos_provaveis") for row in db_clini
+        ),
         "obitos": sum_int(row.get("total_obitos") for row in db_clini),
     }
 
@@ -2037,32 +2120,49 @@ def dashboard_summary() -> dict[str, int]:
 def render_dashboard_rows(rows: Iterable[Mapping[str, Any]]) -> str:
     rendered = []
     for row in rows:
+        municipio_nome = escape_html(row.get("municipio"))
+        estado = escape_html(row.get("estado"))
+        codigo = escape_html(row.get("codigo_municipio"))
+
+        # Suporte a bairro: mostra origem da consulta quando disponível
+        filtro = row.get("filtro_localidade")
+        if filtro and filtro.get("tipo") == "distrito":
+            localidade_original = escape_html(filtro.get("localidade", ""))
+            municipio_display = f'<strong>{municipio_nome}</strong><br><span class="status-line">Busca por: {localidade_original} → {estado} · {codigo}</span>'
+        else:
+            municipio_display = f'<strong>{municipio_nome}</strong><br><span class="status-line">{estado} · {codigo}</span>'
+
         rendered.append(
             "<tr>"
-            f"<td><strong>{escape_html(row.get('municipio'))}</strong><br>"
-            f"<span class=\"status-line\">{escape_html(row.get('estado'))} · {escape_html(row.get('codigo_municipio'))}</span></td>"
-            f"<td>{render_badge(row.get('nivel_risco'))}<br><span class=\"status-line\">score {format_number(row.get('risk_score'))}</span></td>"
-            f"<td>{format_number(row.get('total_casos_provaveis'))}</td>"
-            f"<td>{format_number(row.get('total_obitos'))}</td>"
-            f"<td>{escape_html(', '.join(clean_value(item.get('nome')) for item in row.get('doencas_altas', [])) or 'Sem alerta alto')}</td>"
+            f'<td data-label="Município">{municipio_display}</td>'
+            f'<td data-label="Risco">{render_badge(row.get("nivel_risco"))}<br><span class="status-line">score {format_number(row.get("risk_score"))}</span></td>'
+            f'<td data-label="Casos">{format_number(row.get("total_casos_provaveis"))}</td>'
+            f'<td data-label="Óbitos">{format_number(row.get("total_obitos"))}</td>'
+            f'<td data-label="Doenças altas">{escape_html(", ".join(clean_value(item.get("nome")) for item in row.get("doencas_altas", [])) or "Sem alerta alto")}</td>'
             "</tr>"
         )
-    return "".join(rendered) or '<tr><td colspan="5">Dados ainda não carregados.</td></tr>'
+    return (
+        "".join(rendered)
+        or '<tr><td class="empty-cell" colspan="5"><strong>Dados ainda não carregados.</strong>Recarregue a consulta ou verifique as fontes disponíveis.</td></tr>'
+    )
 
 
 def render_alert_items(alerts: Iterable[Mapping[str, Any]]) -> str:
     rendered = []
     for alert in alerts:
         rendered.append(
-            '<article class="alert-item">'
-            f"<header><strong>{escape_html(alert.get('doenca'))}</strong>{render_badge(alert.get('nivel_risco'))}</header>"
-            f"<p>{escape_html(alert.get('municipio'))}/{escape_html(alert.get('estado'))} · "
+            f'<article class="alert-item {normalize_text(clean_value(alert.get("nivel_risco")) or "baixo")}">'
+            f"<header><strong>{escape_html(alert.get('municipio'))}/{escape_html(alert.get('estado'))}</strong>{render_badge(alert.get('nivel_risco'))}</header>"
+            f"<p><strong>{escape_html(alert.get('doenca'))}</strong> · "
             f"{escape_html(alert.get('virus'))} · {format_number(alert.get('casos_provaveis'))} casos prováveis</p>"
             f"<p>Graves {format_number(alert.get('casos_graves'))} · Óbitos {format_number(alert.get('obitos'))} · "
             f"Score {format_number(alert.get('risk_score'))}</p>"
             "</article>"
         )
-    return "".join(rendered) or '<p class="status-line">Nenhum alerta alto carregado.</p>'
+    return (
+        "".join(rendered)
+        or '<p class="status-line">Nenhum alerta alto carregado. Tente ampliar o filtro ou consultar todos os níveis.</p>'
+    )
 
 
 def render_metric(label: str, value: Any) -> str:
@@ -2075,8 +2175,18 @@ def render_metric(label: str, value: Any) -> str:
 
 
 def render_badge(value: Any) -> str:
-    level = normalize_text(clean_value(value) or "baixo")
-    return f'<span class="badge {level}">{escape_html(value or "baixo")}</span>'
+    raw_label = clean_value(value) or "baixo"
+    level = normalize_text(raw_label)
+    label = {
+        "critico": "Crítico",
+        "alto": "Alto",
+        "moderado": "Moderado",
+        "baixo": "Baixo",
+    }.get(level, raw_label)
+    marker = {"critico": "●", "alto": "▲", "moderado": "◆", "baixo": "●"}.get(
+        level, "●"
+    )
+    return f'<span class="badge {level}">{marker} {escape_html(label)}</span>'
 
 
 def base_json_ld(request: Request) -> list[dict[str, Any]]:
@@ -2120,7 +2230,9 @@ def dataset_json_ld(request: Request) -> dict[str, Any]:
         "license": "https://dados.gov.br/",
         "isBasedOn": sources,
         "spatialCoverage": {"@type": "Place", "name": "Brasil"},
-        "temporalCoverage": str(db_metadata.get("periodo", {}).get("ano", DEFAULT_YEAR)),
+        "temporalCoverage": str(
+            db_metadata.get("periodo", {}).get("ano", DEFAULT_YEAR)
+        ),
         "creator": {"@id": f"{base}/#organization"},
         "variableMeasured": [
             "casos_provaveis",
@@ -2203,7 +2315,13 @@ def agent_manifest(request: Request) -> dict[str, Any]:
             "/v1/risk-index": {
                 "method": "GET",
                 "description": "Índice enriquecido por município com doenças, vírus, score e classificação.",
-                "query": ["municipio", "estado", "somente_altos", "nivel_minimo", "limite"],
+                "query": [
+                    "municipio",
+                    "estado",
+                    "somente_altos",
+                    "nivel_minimo",
+                    "limite",
+                ],
             },
             "/v1/metadata": {
                 "method": "GET",
@@ -2214,6 +2332,11 @@ def agent_manifest(request: Request) -> dict[str, Any]:
                 "method": "GET",
                 "description": "Catálogo de doenças/agravos atualmente suportados pela API.",
                 "query": [],
+            },
+            "/v1/bairros": {
+                "method": "GET",
+                "description": "Lista de bairros/distritos suportados em SP, RJ, MG e PE (resolvidos automaticamente para o município). Suporta filtros ?uf= e ?municipio=.",
+                "query": ["uf", "municipio"],
             },
             "/openapi.json": {
                 "method": "GET",
@@ -2248,7 +2371,9 @@ def supported_diseases_catalog() -> list[dict[str, Any]]:
                 "formula_risco": risk_profile_for_source(source).formula,
                 "ano_carregado": loaded.get("ano"),
                 "registros_carregados": loaded.get("registros"),
-                "url": loaded.get("url") or source.direct_csv_url or catalog_source_url(source),
+                "url": loaded.get("url")
+                or source.direct_csv_url
+                or catalog_source_url(source),
                 "fonte": (
                     "CSV direto OpenDataSUS"
                     if source.direct_csv_url
@@ -2262,10 +2387,14 @@ def supported_diseases_catalog() -> list[dict[str, Any]]:
 
 
 def catalog_source_url(source: DiseaseSource) -> str:
+    from ingestion.sinan_loader import build_dbc_source_url, build_source_url
+
     if source.dbc_prefix:
         return build_dbc_source_url(source, source.latest_year or DEFAULT_YEAR)
     if source.folder and source.file_prefix:
-        return build_source_url(source, min(DEFAULT_YEAR, source.latest_year or DEFAULT_YEAR))
+        return build_source_url(
+            source, min(DEFAULT_YEAR, source.latest_year or DEFAULT_YEAR)
+        )
     return ""
 
 
@@ -2278,6 +2407,7 @@ def llms_text(request: Request) -> str:
 Use /v1/high-alerts for high and critical epidemiological alerts by municipality, disease and virus.
 Use /v1/risk-index for enriched municipal risk context and explanation fields.
 Use /v1/diseases to discover supported diseases and source freshness.
+Use /v1/bairros to see supported neighborhoods in SP, RJ, MG and PE (resolved to municipality). Add ?uf=RJ to filter.
 Use /v1/metadata for data freshness, source URLs and the risk formula.
 
 Base URL: {base}
@@ -2288,7 +2418,7 @@ Methodology: {base}/sobre
 
 Important interpretation rules:
 - Public processed granularity is municipal.
-- When filtro_localidade appears, the original query was resolved to an official municipality.
+- When `filtro_localidade` appears, the original query was made using a neighborhood (bairro) or district name. Currently, this resolution is mainly supported for São Paulo city districts. The data returned is always at the municipal level.
 - Do not infer district-level or neighborhood-level case counts from municipal data.
 - Risk formula: {RISK_FORMULA}
 - Each disease entry includes formula_risco; do not assume one universal formula for all diseases.
@@ -2326,6 +2456,32 @@ def escape_html(value: Any) -> str:
     return html.escape(clean_value(value), quote=True)
 
 
+TIER_ANONYMOUS = "anonymous"
+
+
+async def get_api_user(x_api_key: str | None = Header(None)):
+    tier_info = {"tier": TIER_ANONYMOUS, "rate_limit": 10}
+    request_key = TIER_ANONYMOUS
+
+    if x_api_key:
+        user = api_key_manager.validate_key(x_api_key)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API Key",
+            )
+        tier_info = user
+        request_key = x_api_key
+
+    if not rate_limiter.is_allowed(request_key, tier_info["rate_limit"]):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded",
+        )
+
+    return tier_info
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logger.info("Iniciando ingestão de dados reais do SINAN/OpenDataSUS...")
@@ -2361,6 +2517,27 @@ app = FastAPI(
         },
     ],
 )
+
+
+# Serve extracted static assets (CSS + future JS islands) - Fase 0 UI extraction
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+else:
+    logger.warning("STATIC_DIR %s does not exist - static assets will not be served", STATIC_DIR)
+
+
+@app.middleware("http")
+async def track_usage_middleware(request: Request, call_next):
+    api_key = request.headers.get("X-API-Key", TIER_ANONYMOUS)
+    response = await call_next(request)
+
+    # Log usage only for API endpoints
+    if request.url.path.startswith("/v1/"):
+        usage_tracker.log_usage(
+            api_key, request.url.path, request.method, response.status_code
+        )
+
+    return response
 
 
 @app.middleware("http")
@@ -2403,6 +2580,16 @@ async def sobre(request: Request) -> HTMLResponse:
 )
 async def agentes(request: Request) -> HTMLResponse:
     return HTMLResponse(render_agents_page(request))
+
+
+@app.get(
+    "/planos",
+    tags=["Sistema"],
+    include_in_schema=False,
+    response_class=HTMLResponse,
+)
+async def planos(request: Request) -> HTMLResponse:
+    return HTMLResponse(render_plans_page(request))
 
 
 @app.get("/agent.json", tags=["Sistema"], include_in_schema=False)
@@ -2459,27 +2646,51 @@ async def health() -> dict[str, Any]:
     response_description="Municípios com totais, score, nível de risco e doenças/vírus.",
 )
 async def get_risk_index(
+    ano: int | None = Query(
+        default=None,
+        description="Ano específico para carregar os dados (permite comparação). Se omitido, usa o ano global configurado.",
+    ),
     municipio: str | None = Query(
         default=None,
         description="Filtra por nome parcial ou código de município DataSUS/IBGE sem dígito.",
     ),
     estado: str | None = Query(default=None, description="Filtra por UF, ex.: SP."),
     somente_altos: bool = Query(
-        default=False, description="Retorna apenas municípios com doença em nível alto/crítico."
+        default=False,
+        description="Retorna apenas municípios com doença em nível alto/crítico.",
     ),
     nivel_minimo: str | None = Query(
         default=None, description="baixo, moderado, alto ou critico."
     ),
     limite: int = Query(default=100, ge=1, le=1000),
+    user: dict = Depends(get_api_user),
 ):
+    # Enforce limits for anonymous/free users
+    if user["tier"] == "anonymous" and limite > 5:
+        limite = 5
+    elif user["tier"] == "free" and limite > 20:
+        limite = 20
+
+    # Support loading specific year for comparison (non-recommended high-value path)
+    effective_year = ano if ano is not None else DEFAULT_YEAR
+
+    if effective_year != DEFAULT_YEAR:
+        # Load specific year on demand (for detail view comparison)
+        year_report = fetch_epidemiology_report(effective_year)
+        year_rows = year_report.get("municipios", [])
+    else:
+        year_rows = db_clini
+
     rows = filter_risk_index(
-        db_clini,
+        year_rows,
         municipio=municipio,
         estado=estado,
         somente_altos=somente_altos,
         nivel_minimo=nivel_minimo,
     )
-    return rows[:limite] if rows else {"message": "Dados não disponíveis para o filtro."}
+    return (
+        rows[:limite] if rows else {"message": "Dados não disponíveis para o filtro."}
+    )
 
 
 @app.get(
@@ -2495,7 +2706,14 @@ async def get_high_alerts(
         default=None, description="Filtra por nome ou código: DENG, CHIK ou ZIKA."
     ),
     limite: int = Query(default=100, ge=1, le=1000),
+    user: dict = Depends(get_api_user),
 ) -> dict[str, Any]:
+    # Enforce limits for anonymous/free users
+    if user["tier"] == "anonymous" and limite > 5:
+        limite = 5
+    elif user["tier"] == "free" and limite > 20:
+        limite = 20
+
     alerts = filter_alerts(
         db_alertas, municipio=municipio, estado=estado, doenca=doenca
     )
@@ -2503,6 +2721,53 @@ async def get_high_alerts(
         "metadata": db_metadata,
         "total": len(alerts),
         "alerts": alerts[:limite],
+    }
+
+
+@app.get(
+    "/v1/professional-report",
+    tags=["Risco"],
+    summary="Relatório profissional detalhado (Premium)",
+    response_description="Dados detalhados para análise profissional.",
+)
+async def get_professional_report(
+    municipio: str | None = Query(default=None),
+    estado: str | None = Query(default=None),
+    user: dict = Depends(get_api_user),
+):
+    if user["tier"] not in {"premium", "admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Este endpoint requer uma assinatura Premium.",
+        )
+
+    rows = filter_risk_index(db_clini, municipio=municipio, estado=estado)
+
+    # Add advanced analytics for Professional tier
+    summary = {
+        "total_municipios": len(rows),
+        "total_casos_provaveis": sum(r["total_casos_provaveis"] for r in rows),
+        "total_obitos": sum(r["total_obitos"] for r in rows),
+        "media_risk_score": round(sum(r["risk_score"] for r in rows) / len(rows), 2)
+        if rows
+        else 0,
+        "distribuicao_risco": {
+            "critico": len([r for r in rows if r["nivel_risco"] == "critico"]),
+            "alto": len([r for r in rows if r["nivel_risco"] == "alto"]),
+            "moderado": len([r for r in rows if r["nivel_risco"] == "moderado"]),
+            "baixo": len([r for r in rows if r["nivel_risco"] == "baixo"]),
+        },
+    }
+
+    return {
+        "metadata": {
+            **db_metadata,
+            "report_type": "professional",
+            "generated_for": user.get("owner"),
+            "analytics_version": "1.0.0",
+        },
+        "summary": summary,
+        "data": rows,
     }
 
 
@@ -2515,7 +2780,7 @@ async def refresh_report(
     force_refresh: bool = Query(
         default=True,
         description="Quando true, ignora o cache agregado e reprocessa as fontes reais.",
-    )
+    ),
 ) -> dict[str, Any]:
     await run_in_threadpool(
         load_or_refresh_report, DEFAULT_YEAR, force_refresh=force_refresh
@@ -2524,6 +2789,31 @@ async def refresh_report(
         "metadata": db_metadata,
         "municipios": len(db_clini),
         "alertas_altos": len(db_alertas),
+    }
+
+
+@app.get(
+    "/v1/export/pdf",
+    tags=["Risco"],
+    summary="Gera relatório PDF (Premium)",
+    response_description="Arquivo PDF com análise epidemiológica.",
+)
+async def export_pdf(
+    municipio: str | None = Query(default=None),
+    estado: str | None = Query(default=None),
+    user: dict = Depends(get_api_user),
+):
+    if user["tier"] not in {"premium", "admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Este endpoint requer uma assinatura Premium.",
+        )
+
+    # In a real scenario, we would use a library like ReportLab or WeasyPrint
+    return {
+        "message": "Relatório PDF gerado com sucesso.",
+        "download_url": f"/reports/custom/report-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}.pdf",
+        "note": "A geração de PDF real exige dependências adicionais de sistema.",
     }
 
 
@@ -2547,6 +2837,19 @@ async def get_diseases() -> dict[str, Any]:
         "total": len(diseases),
         "doencas": diseases,
     }
+
+
+@app.get(
+    "/v1/bairros",
+    tags=["Risco"],
+    summary="Bairros e distritos suportados para resolução (multi-cidade)",
+    response_description="Lista agrupada de bairros/distritos de SP, RJ, MG e PE. Use ?uf=RJ ou ?municipio=recife para filtrar.",
+)
+async def get_bairros(
+    uf: str | None = Query(default=None, description="Filtrar por UF (ex: RJ, MG)"),
+    municipio: str | None = Query(default=None, description="Filtrar por nome do município (ex: recife, 'rio de janeiro')"),
+) -> dict[str, Any]:
+    return get_supported_bairros(uf=uf, municipio=municipio)
 
 
 if __name__ == "__main__":

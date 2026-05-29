@@ -1,0 +1,38 @@
+/**
+ * Design Tokens — Aldeia Viva Saúde
+ * Fonte única da verdade para cores, tipografia e espaçamento.
+ * 
+ * Regra: Qualquer valor que apareça em mais de um lugar deve virar token aqui.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Cores semânticas */
+  --ink: #17211c;
+  --muted: #5d6b63;
+  --line: #d9e4dd;
+  --panel: #ffffff;
+  --soft: #f4f8f5;
+
+  /* Cores de marca e estados */
+  --green: #146c43;   /* Principal / Positivo / Baixo */
+  --teal: #067a76;    /* Acentos, links, destaques */
+  --amber: #9a5b00;   /* Alto */
+  --red: #b42318;     /* Crítico */
+  --blue: #2457a6;    /* Moderado */
+
+  /* Elevação */
+  --shadow: 0 18px 45px rgba(23, 33, 28, .08);
+
+  /* Raio */
+  --radius: 16px;
+}
+
+/* Cores de risco (usadas em badges e estados) */
+:root {
+  --risk-baixo: var(--green);
+  --risk-moderado: var(--blue);
+  --risk-alto: var(--amber);
+  --risk-critico: var(--red);
+}

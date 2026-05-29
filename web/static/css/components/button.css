@@ -1,0 +1,32 @@
+/**
+ * Botões
+ */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 10px 15px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  font-weight: 800;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.button.primary {
+  border-color: var(--green);
+  background: var(--green);
+  color: #fff;
+  box-shadow: 0 10px 22px rgba(20, 108, 67, .14);
+}
+
+.button.ghost { background: transparent; }
+
+.button:hover { border-color: rgba(20, 108, 67, .42); }
+.button.primary:hover { background: #0f5d38; }
+.button:active { transform: translateY(0); }
+.button:disabled { cursor: wait; opacity: .72; box-shadow: none; }

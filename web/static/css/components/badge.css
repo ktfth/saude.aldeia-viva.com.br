@@ -1,0 +1,21 @@
+/**
+ * Badges de Nível de Risco
+ */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 27px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #edf2f7;
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 800;
+}
+
+.badge.critico { background: #fee4e2; color: var(--red); }
+.badge.alto { background: #fff3d6; color: var(--amber); }
+.badge.moderado { background: #e4f4ff; color: var(--blue); }
+.badge.baixo { background: #e8f5ee; color: var(--green); }

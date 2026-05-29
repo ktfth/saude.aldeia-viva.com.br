@@ -1,0 +1,26 @@
+/**
+ * Entry point — Aldeia Viva Saúde
+ *
+ * Import order matters:
+ * 1. Tokens (variáveis)
+ * 2. Base (resets + tipografia global)
+ * 3. Layout (header, grids, seções)
+ * 4. Components (específicos)
+ */
+
+@import url("./tokens.css");
+@import url("./base.css");
+@import url("./layout.css");
+
+/* Components */
+@import url("./components/badge.css");
+@import url("./components/button.css");
+@import url("./components/panel.css");
+@import url("./components/table.css");
+@import url("./components/detail-panel.css");
+
+/* Components adicionais */
+@import url("./components/alerts.css");
+
+/* Utilities */
+@import url("./utilities.css");
