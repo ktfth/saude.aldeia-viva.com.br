@@ -18,8 +18,6 @@ import urllib.request
 from datetime import date
 from typing import Any, Iterable, Mapping
 
-import datasus_dbc
-from dbfread import DBF
 
 from aggregation.utils import clean_code, clean_value
 
@@ -140,8 +138,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-import datasus_dbc
-from dbfread import DBF
 
 # Constants are accessed lazily inside functions to avoid circular import
 # problems during the gradual Fase 0 extraction from the monolith.
@@ -198,7 +194,28 @@ def load_csv_records_from_url(url: str, *, encoding: str) -> list[dict[str, str]
     return list(csv.DictReader(text.splitlines(), delimiter=";"))
 
 
+
+def _load_dbc_toolchain():
+    """Importa as dependencias nativas de DBC apenas quando de fato usadas.
+
+    `datasus_dbc` e `dbfread` sao extensoes nativas que nem sempre tem wheel
+    para a versao de Python em uso. Manter o import no topo do modulo derrubava
+    a importacao do app inteiro, mesmo quando a carga usava CSV ou o snapshot
+    embarcado. O erro agora acontece no ponto de uso, com mensagem acionavel.
+    """
+    try:
+        import datasus_dbc
+        from dbfread import DBF
+    except ImportError as exc:  # pragma: no cover - depende do ambiente
+        raise RuntimeError(
+            "Leitura de DBC exige os pacotes nativos 'datasus-dbc' e 'dbfread'. "
+            "Instale-os ou use as fontes CSV/snapshot."
+        ) from exc
+    return datasus_dbc, DBF
+
+
 def load_dbc_records_from_url(url: str) -> list[dict[str, str]]:
+    datasus_dbc, DBF = _load_dbc_toolchain()
     dbc_payload = download_bytes(url)
     dbf_payload = datasus_dbc.decompress_bytes(dbc_payload)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".dbf") as temp_file:

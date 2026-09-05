@@ -57,14 +57,13 @@ from aggregation.utils import normalize_text
 
 # Ingestion layer extraction in progress (Fase 0).
 from ingestion.municipality_lookup import load_municipality_lookup
+from aggregation.recency_enrichment import enrich_report
 from aggregation.report_builder import finalize_municipality_rows, is_death_record, is_hospitalized_record
 from aggregation.utils import any_flag, clean_code, clean_value, first_present, has_any_positive_field, is_truthy_code, parse_date_value, update_latest_date
 
 # The loader module exists. We avoid top-level import here to prevent
 # circular dependencies during the gradual monolith breakup.
 
-import datasus_dbc
-from dbfread import DBF
 from fastapi import FastAPI, Query, Request, Header, HTTPException, Depends, status
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -378,6 +377,24 @@ def public_report_cache_path(path: Path) -> str:
         return path.name
 
 
+def signal_reference_date() -> date:
+    """Data contra a qual a idade dos sinais é medida.
+
+    Normalmente é hoje. `SIGNAL_REFERENCE_DATE=AAAA-MM-DD` fixa a referência,
+    o que torna a resposta reproduzível para quem precisa reprocessar um
+    resultado antigo — inclusive agentes automatizados.
+    """
+    override = os.getenv("SIGNAL_REFERENCE_DATE")
+    if override:
+        try:
+            return date.fromisoformat(override.strip())
+        except ValueError:
+            logger.warning(
+                "SIGNAL_REFERENCE_DATE inválida (%s); usando a data de hoje.", override
+            )
+    return datetime.now(UTC).date()
+
+
 def apply_report_state(
     report: Mapping[str, Any],
     *,
@@ -401,9 +418,14 @@ def apply_report_state(
         key: value for key, value in cache_metadata.items() if value is not None
     }
 
-    db_clini = list(report.get("municipios") or [])
-    db_alertas = list(report.get("alertas_altos") or [])
-    db_metadata = metadata
+    # A recência do sinal é aplicada aqui, no ponto onde as três origens de
+    # dado (carga nova, cache em disco, snapshot embarcado) convergem. Assim
+    # nenhum consumidor recebe um alerta sem saber a idade dele.
+    enriched = enrich_report({**report, "metadata": metadata}, signal_reference_date())
+
+    db_clini = list(enriched.get("municipios") or [])
+    db_alertas = list(enriched.get("alertas_altos") or [])
+    db_metadata = dict(enriched.get("metadata") or metadata)
 
 
 def report_has_content(report: Mapping[str, Any]) -> bool:
