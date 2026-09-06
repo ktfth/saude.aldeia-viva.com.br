@@ -2459,8 +2459,12 @@ async def refresh_report(
 @app.get(
     "/v1/export/pdf",
     tags=["Risco"],
-    summary="Gera relatório PDF (Premium)",
-    response_description="Arquivo PDF com análise epidemiológica.",
+    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+    summary="Não implementado — use /v1/professional-report",
+    response_description=(
+        "501. A geração de PDF não existe neste serviço; "
+        "/v1/professional-report devolve os mesmos dados em JSON."
+    ),
 )
 async def export_pdf(
     municipio: str | None = Query(default=None),
