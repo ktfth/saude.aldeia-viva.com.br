@@ -8,6 +8,7 @@ import threading
 import json
 import logging
 import os
+import re
 import tempfile
 import unicodedata
 import urllib.error
@@ -1479,33 +1480,6 @@ def render_dashboard_rows(rows: Iterable[Mapping[str, Any]]) -> str:
     )
 
 
-def render_alert_items(alerts: Iterable[Mapping[str, Any]]) -> str:
-    rendered = []
-    for alert in alerts:
-        rendered.append(
-            f'<article class="alert-item {normalize_text(clean_value(alert.get("nivel_risco")) or "baixo")}">'
-            f"<header><strong>{escape_html(alert.get('municipio'))}/{escape_html(alert.get('estado'))}</strong>{render_badge(alert.get('nivel_risco'))}</header>"
-            f"<p><strong>{escape_html(alert.get('doenca'))}</strong> · "
-            f"{escape_html(alert.get('virus'))} · {format_number(alert.get('casos_provaveis'))} casos prováveis</p>"
-            f"<p>Graves {format_number(alert.get('casos_graves'))} · Óbitos {format_number(alert.get('obitos'))} · "
-            f"Score {format_number(alert.get('risk_score'))}</p>"
-            "</article>"
-        )
-    return (
-        "".join(rendered)
-        or '<p class="status-line">Nenhum alerta alto carregado. Tente ampliar o filtro ou consultar todos os níveis.</p>'
-    )
-
-
-def render_metric(label: str, value: Any) -> str:
-    return (
-        '<div class="metric">'
-        f"<span>{escape_html(label)}</span>"
-        f"<strong>{format_number(value)}</strong>"
-        "</div>"
-    )
-
-
 def render_badge(value: Any) -> str:
     raw_label = clean_value(value) or "baixo"
     level = normalize_text(raw_label)
@@ -2038,6 +2012,44 @@ app = FastAPI(
 
 # Serve extracted static assets (CSS + future JS islands) - Fase 0 UI extraction
 if STATIC_DIR.exists():
+
+    @app.get("/static/css/main.css", include_in_schema=False)
+    async def serve_main_css() -> Response:
+        """`main.css` com a versão propagada para cada `@import`.
+
+        A impressão digital em `?v=` já cobria TODOS os arquivos CSS, mas só
+        era aplicada ao `main.css`. Os componentes — onde vive quase todo o
+        estilo — são buscados pelo navegador com a URL crua do `@import`, sem
+        parâmetro nenhum. Resultado: `main.css?v=novo` era rebaixado, e o
+        navegador seguia usando o `detail-panel.css` que já tinha em cache.
+
+        Medido: depois de editar `detail-panel.css`, a página aplicava
+        `@media (max-width: 820px)` — a regra anterior à edição. Uma correção
+        de estilo simplesmente não chegava a quem já tinha visitado o site, e
+        nada falhava.
+
+        Esta rota é registrada ANTES do mount de `/static` para ter
+        precedência sobre ele; o resto dos arquivos continua sendo servido
+        pelo `StaticFiles`.
+        """
+        version = static_asset_version()
+        try:
+            css = (STATIC_DIR / "css" / "main.css").read_text(encoding="utf-8")
+        except OSError as error:  # pragma: no cover - defensivo
+            logger.error("Falha ao ler main.css: %s", error)
+            raise HTTPException(status_code=404, detail="main.css indisponível")
+
+        versionado = re.sub(
+            r'@import url\("([^"?]+)"\)',
+            lambda m: f'@import url("{m.group(1)}?v={version}")',
+            css,
+        )
+        return Response(
+            content=versionado,
+            media_type="text/css",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 else:
     logger.warning("STATIC_DIR %s does not exist - static assets will not be served", STATIC_DIR)

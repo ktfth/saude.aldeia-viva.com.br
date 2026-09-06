@@ -21,8 +21,6 @@
 @import url("./components/content.css");
 @import url("./components/detail-panel.css");
 
-/* Components adicionais */
-@import url("./components/alerts.css");
 
 /* Utilities */
 @import url("./utilities.css");
