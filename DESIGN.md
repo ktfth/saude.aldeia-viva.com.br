@@ -1,6 +1,6 @@
 # Design System — Aldeia Viva Saúde
 
-**Versão:** 0.2 (reconstrução minimalista + dimensão temporal)
+**Versão:** 0.3 (reconstrução minimalista + dimensão temporal + denominador)
 
 Este documento é a fonte da verdade para decisões visuais e de interface.  
 Objetivo: permitir melhorias sustentáveis sem que o projeto volte a parecer "vibe codado".
@@ -182,15 +182,64 @@ futuro, ele precisa justificar o próprio peso contra a regra 1 acima.
 5. Antes de adicionar um bloco: qual decisão ele muda? Se não houver resposta,
    ele não entra
 
+## O denominador (adicionado na iteração 2)
+
+`risk_score` é soma ponderada de contagens absolutas. Medido no relatório
+real, ele tem **correlação de Pearson 0,822 com a população municipal**
+(Spearman 0,658): ordenar por score era, em boa medida, ordenar por tamanho
+de cidade, e o painel apresentava isso como priorização de risco.
+
+Trocar a ordenação padrão do painel para incidência por 100 mil habitantes
+mudou **8 dos 8 municípios da primeira dobra**:
+
+| antes (por score) | agora (por taxa) |
+|---|---|
+| São Paulo — 86/100k | Sete Quedas/MS — 6.612/100k |
+| Goiânia | Caldas Novas/GO — 6.211/100k |
+| Porto Alegre | Rialma/GO — 5.910/100k |
+| Rio de Janeiro — 63/100k | Firminópolis/GO — 4.772/100k |
+
+Onze dos quinze municípios de maior taxa estavam fora do top 50 por contagem.
+
+**Regras da taxa:**
+
+1. Nunca publicada como número nu — o denominador vem ao lado.
+2. Abaixo de 10.000 habitantes (`MIN_RELIABLE_POPULATION`) a taxa é marcada
+   como não confiável e desce na ordenação. **Publicada, nunca suprimida em
+   silêncio** — omitir sem dizer é tão desonesto quanto publicar sem ressalva.
+3. Sem população conhecida, a célula diz "sem denominador" e mostra a
+   contagem absoluta. A ausência é um estado nomeado, não um traço.
+4. `risk_score` continua existindo e continua sendo contagem absoluta —
+   útil para dimensionar resposta, inútil para comparar municípios de portes
+   diferentes. O seletor "Ordenar por" deixa isso explícito e reversível.
+
+## Uma autoridade por fato
+
+Regra que emergiu das duas iterações e que evita o defeito mais caro do
+projeto: **cada fato tem exatamente um lugar que o produz.**
+
+| Fato | Autoridade |
+|---|---|
+| Gravidade por agravo | `domain/risk.py` (perfil por agravo) |
+| Gravidade municipal | pior nível entre os agravos — nunca fórmula sobre a soma |
+| Idade da fonte e do sinal | `aggregation/recency_enrichment.py` |
+| População e incidência | `aggregation/population_enrichment.py` |
+
+O `report_builder` tentava computar população e taxa a partir de um lookup
+que nunca teve o campo: passava nos testes e produzia `None` em 100% dos
+casos em produção. Enriquecer na entrada do relatório em memória faz o
+resultado valer para as três origens do dado — carga nova, cache em disco e
+snapshot embarcado — em vez de só depois de uma recarga completa.
+
 ## Dívida conhecida
 
-- `periodo.ano` ainda repete o ano solicitado em vez do ano real da fonte
-  (`aggregation/report_builder.py`). A UI e o `agent.json` contornam lendo
-  `fonte.ano`, mas a origem precisa ser corrigida.
-- Não há população municipal na base, logo `taxa_incidencia_100k` é sempre
-  `None` e a ordenação por `risk_score` aproxima uma ordenação por população.
-- `nivel_risco` municipal é calculado sem perfil por agravo e satura: 90% dos
-  municípios classificados como "crítico" apenas têm ao menos um óbito.
+- `bundled_report_snapshot.py` tem 893 KB versionados no repositório.
+- A carga do SINAN não é reprocessada desde 2026-04-26; a barra de estado
+  diz isso ao usuário, mas o agendamento da recarga não existe.
+- `nivel_risco` histórico ainda deixa 23,5% dos municípios em "crítico".
+  O recorte por fonte atual resolve para a operação (8,8%), mas o número
+  histórico permanece pouco discriminante por natureza — ele agrega cinco
+  anos-fonte.
 
 ---
 
