@@ -153,13 +153,42 @@ class APIKeyManager:
         self.load_keys()
 
     def load_keys(self):
-        if self.path.exists():
+        """Carrega as chaves de `USERS_DB_JSON` ou do arquivo, e declara a falta.
+
+        O arquivo de chaves não está no repositório — e não deve estar, porque
+        guarda credenciais. O efeito colateral disso era silencioso: um clone
+        limpo, ou um deploy disparado pelo git, subia com ZERO chaves válidas
+        e não dizia nada. Todo endpoint autenticado devolvia 401 e o log ficava
+        mudo. Medido num clone real: 8 testes falhando, todos por esta causa.
+
+        `USERS_DB_JSON` permite ao ambiente carregar as chaves como segredo, em
+        vez de depender de um arquivo que o repositório não pode transportar.
+        """
+        inline = os.getenv("USERS_DB_JSON")
+        if inline:
+            try:
+                self.keys = json.loads(inline).get("keys", {})
+            except (json.JSONDecodeError, AttributeError) as error:
+                logger.error("USERS_DB_JSON presente mas inválido: %s", error)
+        elif self.path.exists():
             try:
                 with open(self.path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.keys = data.get("keys", {})
             except Exception as e:
                 logger.error(f"Error loading API keys: {e}")
+        else:
+            logger.warning(
+                "Arquivo de chaves ausente em %s e USERS_DB_JSON não definido.",
+                self.path,
+            )
+
+        if not self.keys:
+            logger.warning(
+                "Nenhuma chave de API carregada: apenas o tier anônimo "
+                "responderá (5 registros por chamada, 10 req/min). Defina "
+                "USERS_DB_JSON ou USERS_DB_PATH para habilitar as chaves."
+            )
 
     def validate_key(self, api_key: str) -> Optional[dict]:
         """Valida a chave, aceitando entrada em texto puro ou em hash.

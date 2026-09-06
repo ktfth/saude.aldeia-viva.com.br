@@ -51,7 +51,7 @@ class TestTierDeclaration(unittest.TestCase):
         import json
         from pathlib import Path
 
-        keys = json.loads(Path("data/users.json").read_text(encoding="utf-8"))["keys"]
+        keys = json.loads(app.USERS_DB_PATH.read_text(encoding="utf-8"))["keys"]
         free_key = next(v for v in keys.values() if v["tier"] == "free")
         self.assertEqual(tier_by_code("free").rate_limit, free_key["rate_limit"])
 
@@ -59,7 +59,7 @@ class TestTierDeclaration(unittest.TestCase):
         import json
         from pathlib import Path
 
-        keys = json.loads(Path("data/users.json").read_text(encoding="utf-8"))["keys"]
+        keys = json.loads(app.USERS_DB_PATH.read_text(encoding="utf-8"))["keys"]
         premium_key = next(v for v in keys.values() if v["tier"] == "premium")
         self.assertEqual(tier_by_code("premium").rate_limit, premium_key["rate_limit"])
 

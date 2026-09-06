@@ -79,7 +79,33 @@ Todas são opcionais; os valores entre parênteses são os padrões.
 | `SINAN_DISABLE_REPORT_CACHE` | `1` desliga a cache agregada |
 | `PUBLIC_BASE_URL` | URL pública usada em links canônicos e no `agent.json` |
 | `USERS_DB_PATH` | arquivo de chaves de API (`data/users.json`) |
+| `USERS_DB_JSON` | as chaves como JSON literal, para carregar por segredo em vez de arquivo. Tem precedência sobre `USERS_DB_PATH` |
 | `USAGE_LOG_PATH` | log de uso (`data/usage.jsonl`). Grava a impressão digital da chave, nunca a chave |
+
+## As chaves de API não estão no repositório
+
+`data/users.json` guarda credenciais e por isso não é versionado. A
+consequência era silenciosa: **um deploy disparado pelo git sobe sem chave
+alguma** — todo endpoint autenticado devolve 401 e apenas o tier anônimo
+responde. O deploy atual funciona porque o arquivo existe na máquina de quem
+roda `vercel deploy` e sobe junto com o diretório.
+
+Duas formas de resolver, em ordem de preferência:
+
+1. **`USERS_DB_JSON` como segredo do ambiente** — as chaves deixam de depender
+   de um arquivo que o repositório não pode transportar:
+
+   ```bash
+   vercel env add USERS_DB_JSON production
+   # cole: {"keys": {"SUA_CHAVE": {"owner": "...", "tier": "premium", "rate_limit": 10000}}}
+   ```
+
+2. **Manter o arquivo** e continuar publicando pela CLI a partir de uma
+   máquina que o tenha.
+
+O serviço agora avisa no log quando sobe sem chave nenhuma, em vez de aceitar
+a situação em silêncio. Uma entrada cuja chave comece com `sha256:` guarda o
+digest em vez do segredo.
 
 ## Verificações pós-deploy
 
