@@ -151,7 +151,14 @@ DISEASE_SOURCES: dict[str, DiseaseSource] = {
         file_prefix="",
         first_year=2007,
         dbc_prefix="BOTU",
-        latest_year=2023,
+        # 2024 está publicado no FTP do DATASUS; o teto parado em 2023 fazia o
+        # carregador começar já um ano atrás e nunca alcançá-lo. Medido
+        # listando o diretório FINAIS em 2026-09-06: BOTU vai até 2024, e os
+        # demais tetos conferem com o servidor — MENI e ANIM realmente param
+        # em 2022, TOXC/TOXG/HANS em 2023, LEPT em 2024. A defasagem desses é
+        # da fonte, e não configuração velha. Use `scripts/auditar_fontes.py`
+        # para reconferir.
+        latest_year=2024,
         risk_profile="rare_severe",
         severe_fields=frozenset({"STRESPIRA", "STCARDIACA", "STCOMA"}),
         hospitalization_fields=frozenset({"STHOSPITAL"}),
