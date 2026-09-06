@@ -545,7 +545,13 @@ class AppImportTest(unittest.TestCase):
 
         self.assertEqual(loaded["metadata"]["status"], "ok")
         self.assertEqual(app.db_metadata["cache"]["source"], "bundled")
-        self.assertEqual(app.db_clini[0]["municipio"], "São Paulo")
+        # O que este teste verifica e o MECANISMO: snapshot antes de buscar.
+        # A assercao anterior cravava "Sao Paulo" como primeiro colocado, o
+        # que nao diz nada sobre o mecanismo e quebra sempre que o dado muda
+        # -- quebrou na primeira regeneracao do snapshot, quando Goiania
+        # passou a liderar. O que importa e o snapshot trazer a base inteira,
+        # e nao um esboco.
+        self.assertGreater(len(app.db_clini), 5000)
 
     def test_refresh_endpoint_reprocesses_report_without_blocking_event_loop(self) -> None:
         def fake_refresh(year: int, *, force_refresh: bool) -> dict[str, object]:

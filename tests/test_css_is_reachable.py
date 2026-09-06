@@ -51,6 +51,11 @@ ISENTAS = {
     "active": "aplicada na navegação por comparação de rota",
     "short": "modificador de .skeleton-line, aplicado ao montar o esqueleto",
     "is-stale": "aplicada quando a carga passa do prazo",
+    "status-warn": (
+        "aviso de carga velha, renderizado junto de is-stale; com o snapshot "
+        "regenerado das fontes nao ha carga velha, e a classe fica sem "
+        "alcance neste estado"
+    ),
     "is-featured": "aplicada ao plano em destaque",
 }
 
