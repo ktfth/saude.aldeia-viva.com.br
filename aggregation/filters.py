@@ -370,6 +370,24 @@ def level_at_least(level: str, minimum: str) -> bool:
     return order.get(level, -1) >= order.get(minimum, -1)
 
 
+def displayed_level(row: Mapping[str, Any]) -> str:
+    """O nível que o painel de fato mostra para este município.
+
+    O filtro usava `nivel_risco`, que consolida todos os anos-fonte, enquanto
+    a interface passou a exibir `nivel_risco_fonte_atual`. Medido: pedindo
+    "apenas crítico", 54% dos municípios devolvidos tinham badge diferente de
+    crítico — o usuário filtrava por um nível e via outro na tela.
+
+    O histórico continua disponível em `nivel_risco`; o que muda é o campo que
+    o filtro usa, para concordar com o que é exibido. Cai de volta no
+    histórico quando o enriquecimento não está presente, para que uma cache
+    antiga não pare de filtrar.
+    """
+    return clean_value(
+        row.get("nivel_risco_fonte_atual") or row.get("nivel_risco")
+    )
+
+
 def filter_risk_index(
     rows: Iterable[Mapping[str, Any]],
     *,
@@ -397,12 +415,30 @@ def filter_risk_index(
             continue
         if somente_altos and not row.get("doencas_altas"):
             continue
-        if min_level and not level_at_least(
-            clean_value(row.get("nivel_risco")), min_level
-        ):
+        if min_level and not level_at_least(displayed_level(row), min_level):
             continue
         filtered.append(with_locality_alias(row, locality_alias))
     return filtered
+
+
+def disease_matches(alert: Mapping[str, Any], disease_filter: str) -> bool:
+    """Casa o agravo pelo código exato ou por parte do nome.
+
+    A comparação anterior exigia igualdade com o nome COMPLETO ou o código:
+
+        doenca=CHIK                 ->  139 alertas
+        doenca=Febre de Chikungunya ->  139 alertas
+        doenca=chikungunya          ->    0 alertas
+
+    `dengue` funcionava por acidente, porque o nome completo é "Dengue". O
+    defeito atingia todo agravo de nome composto — metade do catálogo.
+
+    O código continua exigindo igualdade: é identificador, e `DEN` não pode
+    casar `DENG` por engano.
+    """
+    name = normalize_text(clean_value(alert.get("doenca")))
+    code = normalize_text(clean_value(alert.get("codigo_doenca")))
+    return disease_filter == code or disease_filter in name
 
 
 def filter_alerts(
@@ -429,9 +465,7 @@ def filter_alerts(
             alert, municipality_filter, locality_alias
         ):
             continue
-        disease_name = normalize_text(clean_value(alert.get("doenca")))
-        disease_code = normalize_text(clean_value(alert.get("codigo_doenca")))
-        if disease_filter and disease_filter not in {disease_name, disease_code}:
+        if disease_filter and not disease_matches(alert, disease_filter):
             continue
         filtered.append(with_locality_alias(alert, locality_alias))
     return filtered

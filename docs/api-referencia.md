@@ -58,7 +58,10 @@ Parâmetros:
   nas cidades suportadas.
 - `estado` — UF. Também **desambigua** bairros homônimos entre cidades.
 - `somente_altos`
-- `nivel_minimo` — `baixo`, `moderado`, `alto` ou `critico`.
+- `nivel_minimo` — `baixo`, `moderado`, `alto` ou `critico`. Filtra por
+  `nivel_risco_fonte_atual`, **o mesmo campo que o painel exibe**. Antes usava
+  o nível histórico, e 54% dos municípios devolvidos vinham com badge
+  diferente do nível pedido.
 - `ordenar` — `score` (padrão), `taxa`, `casos` ou `obitos`.
 - `pagina` — usada com `limite` para percorrer a base completa.
 - `limite`
@@ -117,7 +120,9 @@ Parâmetros:
 
 - `municipio`
 - `estado`
-- `doenca`
+- `doenca` — código exato (`DENG`, `CHIK`, `YF`...) ou parte do nome, sem
+  acento. `chikungunya`, `amarela` e `toxoplasmose` funcionam; antes só o nome
+  completo ou o código casavam.
 - `pagina`
 - `limite`
 

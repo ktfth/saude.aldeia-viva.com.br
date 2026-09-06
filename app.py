@@ -1696,6 +1696,8 @@ def agent_manifest(request: Request) -> dict[str, Any]:
             "pendentes muito diferentes produzem incidências fora da mesma escala.",
             "`casos_descartados` igual a zero costuma significar 'nada encerrado ainda', não "
             "'nada descartado'. Hoje é zero em oito dos dez agravos.",
+            "`nivel_minimo` filtra por `nivel_risco_fonte_atual`, o mesmo campo que o painel "
+            "exibe. Para recortar pela gravidade histórica, filtre `nivel_risco` do seu lado.",
         ],
         "recommended_use": [
             "Use /v1/high-alerts para priorizar municípios com doenças em nível alto ou crítico.",
@@ -2161,7 +2163,12 @@ async def get_risk_index(
         description="Retorna apenas municípios com doença em nível alto/crítico.",
     ),
     nivel_minimo: str | None = Query(
-        default=None, description="baixo, moderado, alto ou critico."
+        default=None,
+        description=(
+            "baixo, moderado, alto ou critico. Filtra por "
+            "`nivel_risco_fonte_atual` — o mesmo campo que o painel exibe —, "
+            "caindo em `nivel_risco` quando aquele não existe."
+        ),
     ),
     ordenar: str = Query(
         default="score",
@@ -2228,7 +2235,11 @@ async def get_high_alerts(
     municipio: str | None = Query(default=None),
     estado: str | None = Query(default=None),
     doenca: str | None = Query(
-        default=None, description="Filtra por nome ou código: DENG, CHIK ou ZIKA."
+        default=None,
+        description=(
+            "Código exato (DENG, CHIK, ZIKA...) ou parte do nome, sem acento: "
+            "`chikungunya` e `amarela` funcionam."
+        ),
     ),
     pagina: int = Query(default=1, ge=1),
     limite: int = Query(default=100, ge=1, le=MAX_RESULTS_PER_CALL),
