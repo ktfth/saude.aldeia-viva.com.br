@@ -158,14 +158,3 @@ def with_recency(
     return enriched
 
 
-def worst_freshness(values: Iterable[str]) -> str:
-    """Frescor consolidado: o mais fresco entre os sinais disponíveis.
-
-    Para um município, o que importa operacionalmente é o sinal mais vivo que
-    ele tem — é ele que dispara a ação.
-    """
-    seen = {v for v in values if v in FRESHNESS_ORDER}
-    for level in FRESHNESS_ORDER:
-        if level in seen:
-            return level
-    return UNKNOWN

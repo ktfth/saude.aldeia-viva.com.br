@@ -110,11 +110,28 @@ from starlette.concurrency import run_in_threadpool
 
 try:
     from bundled_report_snapshot import load_embedded_report_snapshot
-except ImportError:  # pragma: no cover - fallback for local-only runs before bundling
+except ImportError:  # pragma: no cover - ausência é anômala; avisada abaixo
     load_embedded_report_snapshot = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+if load_embedded_report_snapshot is None:
+    # O comentário anterior descrevia esta guarda como "fallback for
+    # local-only runs before bundling" — uma fase que acabou. Hoje
+    # `bundled_report_snapshot.py` é a ÚNICA origem de dado num deploy:
+    # `.vercelignore` exclui o resto, e os JSON versionados foram removidos
+    # por não serem lidos por código nenhum.
+    #
+    # Sem este aviso, um artefato sem o módulo subiria com a base vazia e o
+    # log mudo — o mesmo modo de falha do arquivo de chaves ausente, que
+    # custou 8 testes e uma API inteira em 401 antes de passar a avisar.
+    #
+    # O aviso não pode ficar dentro do `except`: `logger` só existe depois.
+    logger.warning(
+        "bundled_report_snapshot indisponível; sem cache utilizável o "
+        "serviço dependerá de rede para ter qualquer dado."
+    )
 
 OPEN_DATA_SUS_S3_BASE = "https://s3.sa-east-1.amazonaws.com/ckan.saude.gov.br"
 DATASUS_SINAN_DBC_BASE = "ftp://ftp.datasus.gov.br/dissemin/publicos/SINAN/DADOS/FINAIS"
@@ -1563,17 +1580,6 @@ GET /v1/risk-index?municipio=perus&amp;estado=SP&amp;somente_altos=false</pre>
 # Legacy inline JS (Fase 0) - real implementation moved to web/static/js/dashboard.js
 
 
-def dashboard_summary() -> dict[str, int]:
-    return {
-        "municipios_monitorados": len(db_clini),
-        "alertas_altos": len(db_alertas),
-        "casos_provaveis": sum_int(
-            row.get("total_casos_provaveis") for row in db_clini
-        ),
-        "obitos": sum_int(row.get("total_obitos") for row in db_clini),
-    }
-
-
 def render_dashboard_rows(rows: Iterable[Mapping[str, Any]]) -> str:
     """Quatro colunas. A coluna com nomes de doenças virou tira de agravos:
     mesma informação em menos pixels, mais a idade da fonte que faltava."""
@@ -2022,16 +2028,6 @@ def sitemap_xml(request: Request) -> str:
         for path in PUBLIC_PATHS
     )
     return f'<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n{urls}\n</urlset>\n'
-
-
-def sum_int(values: Iterable[Any]) -> int:
-    total = 0
-    for value in values:
-        try:
-            total += int(value or 0)
-        except (TypeError, ValueError):
-            continue
-    return total
 
 
 def format_number(value: Any) -> str:
