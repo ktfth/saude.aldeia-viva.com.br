@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api/index" }
+  ],
+  "env": {
+    "SINAN_CACHE_DIR": "/tmp/datasus",
+    "SINAN_REPORT_CACHE_MAX_AGE_DAYS": "0"
+  }
+}

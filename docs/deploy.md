@@ -34,38 +34,34 @@ O `Dockerfile` e o `docker-compose.yml` na raiz sobem o serviço, com um
 docker compose up --build
 ```
 
-## Vercel — configuração ausente
+## Vercel
 
-**O repositório não tem configuração de Vercel.** O commit `e129698`
-(2026-04-26, "fix deploy and improved docs") removeu `api/index.py` e
-`vercel.json` — e escreveu, no mesmo commit, a versão anterior deste
-documento afirmando que o deploy era na Vercel. Um deploy hoje subiria sem
-função Python.
+`api/index.py` e `vercel.json` foram removidos pelo commit `e129698`
+(2026-04-26, "fix deploy and improved docs") — no mesmo commit que escreveu a
+versão anterior deste documento afirmando que o deploy era na Vercel.
+Restaurados.
 
-Para reativar, dois arquivos:
-
-`api/index.py`
-
-```python
-from app import app
+```bash
+vercel --prod
 ```
 
-`vercel.json`
+A função roda com o snapshot embarcado: `.vercelignore` exclui
+`data/reports/` e `api/data/`, que somariam 34 MB ao bundle sem acrescentar
+dado nenhum — os mesmos 5.339 municípios já estão em
+`bundled_report_snapshot.py`.
 
-```json
-{
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": { "api/index.py": { "maxDuration": 60 } },
-  "routes": [{ "src": "/(.*)", "dest": "/api/index.py" }]
-}
-```
+Duas variáveis vão no `vercel.json` porque o sistema de arquivos é somente
+leitura fora de `/tmp`:
 
-Antes de reativar, considere que a carga completa lê um cache de 17 MB e que
-`api/data/reports/` guarda uma cópia versionada dele — o limite de tamanho da
-função pode ser o motivo pelo qual a configuração foi removida.
+- `SINAN_CACHE_DIR=/tmp/datasus` — para onde vai qualquer tentativa de escrita
+- `SINAN_REPORT_CACHE_MAX_AGE_DAYS=0` — desliga a expiração, já que não há
+  cache persistente entre invocações e cada tentativa de recarga só somaria
+  latência ao cold start
 
-`tests/test_docs_contract.py` verifica que este documento não volte a afirmar
-um alvo de deploy cujo artefato não está no repositório.
+Consequência a conhecer: **a instância da Vercel serve o snapshot embarcado**,
+que é a carga de abril de 2026. A barra de estado do painel declara essa idade
+em todas as páginas. Para dado novo, é preciso regenerar o snapshot e publicar,
+ou hospedar num ambiente com disco persistente — o Docker acima.
 
 ## Variáveis de ambiente
 

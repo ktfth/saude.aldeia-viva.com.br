@@ -1,0 +1,22 @@
+# O snapshot embarcado ja carrega os 5.339 municipios; as copias em JSON
+# somariam 34 MB ao bundle sem acrescentar dado nenhum.
+data/reports
+api/data
+.cache
+
+# Nada disto e executado em producao.
+tests
+docs
+*.md
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ralph
+.pi
+.pi-lens
+test-results
+Dockerfile
+docker-compose*.yml
+.dockerignore
