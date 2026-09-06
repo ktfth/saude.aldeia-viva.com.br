@@ -97,6 +97,14 @@
   gap: 5px;
 }
 
+/* Amostras de cor da legenda. Estavam com o valor hexadecimal escrito no
+   atributo style, gerado pelo Python — a unica cor do projeto que ainda
+   vivia fora do CSS. */
+.strip-legend i.swatch-atual { background: var(--fonte-atual); }
+.strip-legend i.swatch-recente { background: var(--fonte-1ano); }
+.strip-legend i.swatch-antiga { background: var(--fonte-antiga); }
+.strip-legend i.swatch-ausente { background: var(--fonte-ausente); }
+
 .strip-legend i {
   width: 11px;
   height: 11px;

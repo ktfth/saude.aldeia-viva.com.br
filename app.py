@@ -52,6 +52,8 @@ from aggregation.filters import (
     with_locality_alias,
     level_at_least,
     LOCALITY_ALIASES,
+    CITY_NEIGHBORHOODS,
+    ambiguous_locality_names,
     get_supported_bairros,
 )
 from aggregation.utils import normalize_text
@@ -1041,7 +1043,10 @@ def render_dashboard_page(request: Request) -> str:
             breadcrumb_json_ld(request, "Dashboard", "/dashboard"),
         ],
         active="dashboard",
-        extra_script='<script src="/static/js/dashboard.js?v={static_asset_version()}" defer></script>',
+        extra_script=(
+            '<script src="/static/js/dashboard.js'
+            f'?v={static_asset_version()}" defer></script>'
+        ),
     )
 
 
@@ -1190,6 +1195,40 @@ def render_explanation_page(request: Request) -> str:
     )
 
 
+def render_locality_examples() -> str:
+    """Dois exemplos por cidade, tirados do registro.
+
+    A lista anterior era escrita a mao no HTML. Os oito nomes funcionavam,
+    mas nada garantia que continuassem funcionando: bastava alguem editar
+    CITY_NEIGHBORHOODS. Gerar do registro elimina a possibilidade de deriva.
+    """
+    exemplos: list[str] = []
+    ambiguos = set(ambiguous_locality_names())
+    for city in CITY_NEIGHBORHOODS.values():
+        disponiveis = [
+            bairro
+            for bairro in sorted(city["bairros"])
+            if normalize_text(bairro) not in ambiguos
+        ]
+        for bairro in disponiveis[:2]:
+            exemplos.append(f"<code>{escape_html(bairro.lower())}</code>")
+    return "".join(exemplos)
+
+
+def render_ambiguous_localities() -> str:
+    """Declara os nomes que existem em mais de uma cidade suportada."""
+    ambiguos = ambiguous_locality_names()
+    if not ambiguos:
+        return ""
+    itens = ", ".join(f"<code>{escape_html(nome)}</code>" for nome in ambiguos)
+    return (
+        f'<p class="status-line"><strong>Nomes ambíguos:</strong> {itens} existem '
+        "em mais de uma cidade suportada. Informe <code>estado</code> para "
+        "escolher; sem ele a resposta traz <code>filtro_localidade.ambiguidade</code> "
+        "com as alternativas.</p>"
+    )
+
+
 def render_agents_page(request: Request) -> str:
     body = f"""
 <main class="page" id="conteudo-principal">
@@ -1219,7 +1258,9 @@ def render_agents_page(request: Request) -> str:
       <pre class="code-block">GET /v1/high-alerts?estado=SP&amp;limite=10
 GET /v1/risk-index?municipio=perus&amp;estado=SP&amp;somente_altos=false</pre>
       <h2>Regras de interpretação</h2>
-      <p>Use <code>nivel_risco</code> para priorização, <code>risk_score</code> para ordenação, <code>/v1/diseases</code> para descobrir agravos carregados e <code>filtro_localidade</code> para identificar quando a consulta original foi feita por um <strong>bairro ou distrito</strong> (suportado em SP, RJ, MG e PE). O sistema resolve o nome para o município correspondente — a granularidade dos dados continua municipal.</p>
+      <p>Use <code>nivel_risco_fonte_atual</code> para priorizar ação de hoje e <code>incidencia.por_100k</code> para comparar municípios: é a única medida que não depende do tamanho da cidade. <code>risk_score</code> é soma de contagens absolutas e correlaciona 0,82 com a população — ordene por ele apenas quando a pergunta for "onde há mais casos", nunca "onde é pior".</p>
+      <p>Cada agravo declara <code>fonte.ano</code>, o ano do arquivo SINAN de onde veio, e <code>recencia.frescor</code>, medido dentro dessa fonte. O relatório reúne anos diferentes por agravo: verifique <code>fonte.do_ano_corrente</code> antes de datar qualquer afirmação. <code>/v1/diseases</code> lista os agravos carregados.</p>
+      <p><code>filtro_localidade</code> aparece quando a consulta foi feita por <strong>bairro ou distrito</strong>. O sistema resolve o nome para o município — a granularidade dos dados continua municipal.</p>
     </section>
     <aside class="text-aside" aria-label="Orientações para integrações">
       <article class="note-card"><strong>Comece por alertas</strong><p>Use <code>/v1/high-alerts</code> para triagem e <code>/v1/risk-index</code> para telas de exploração com filtros.</p></article>
@@ -1239,25 +1280,15 @@ GET /v1/risk-index?municipio=perus&amp;estado=SP&amp;somente_altos=false</pre>
       </p>
 
       <p><strong>Exemplos de buscas que funcionam:</strong></p>
-      <div style="display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0;">
-        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">perus</code>
-        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">grajaú</code>
-        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">copacabana</code>
-        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">ipanema</code>
-        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">savassi</code>
-        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">pampulha</code>
-        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">boa viagem</code>
-        <code style="background:#f1f5f9; padding:2px 8px; border-radius:4px;">madalena</code>
-      </div>
+      <div class="token-list">{render_locality_examples()}</div>
+      {render_ambiguous_localities()}
 
       <p>
         <strong>Lista completa e estruturada:</strong> <a href="/v1/bairros">GET /v1/bairros</a>
         (retorna todas as cidades com seus bairros em formato agrupado).
       </p>
 
-      <p style="font-size: 0.9rem; color: #64748b;">
-        Dica para agentes: Prefira buscar pelo nome do bairro quando estiver em campo. O sistema entrega os dados do município com o contexto da origem (bairro → município).
-      </p>
+      <p class="status-line">Prefira o nome do bairro quando estiver em campo: o sistema entrega os dados do município com o contexto da origem.</p>
     </section>
   </div>
 </main>"""

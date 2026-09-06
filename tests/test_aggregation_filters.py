@@ -20,16 +20,24 @@ from aggregation.filters import (
 
 
 class TestLocalityAliases(unittest.TestCase):
+    """LOCALITY_ALIASES passou a guardar TODOS os candidatos por nome.
+
+    O formato plano perdia bairros homônimos entre cidades: a última cidade
+    iterada sobrescrevia a anterior, e `penha`/`campo grande` com estado=SP
+    devolviam vazio. Ver tests/test_locality_ambiguity.py.
+    """
+
     def test_perus_resolves_to_sao_paulo(self):
-        alias = LOCALITY_ALIASES.get("perus")
-        self.assertIsNotNone(alias)
-        self.assertEqual(alias["municipio_resolvido"], "São Paulo")
-        self.assertEqual(alias["estado"], "SP")
+        candidatos = LOCALITY_ALIASES.get("perus")
+        self.assertIsNotNone(candidatos)
+        self.assertEqual(len(candidatos), 1)
+        self.assertEqual(candidatos[0]["municipio_resolvido"], "São Paulo")
+        self.assertEqual(candidatos[0]["estado"], "SP")
 
     def test_vila_mariana_resolves(self):
-        alias = LOCALITY_ALIASES.get("vila mariana")
-        self.assertIsNotNone(alias)
-        self.assertEqual(alias["codigo_municipio"], "355030")
+        candidatos = LOCALITY_ALIASES.get("vila mariana")
+        self.assertIsNotNone(candidatos)
+        self.assertEqual(candidatos[0]["codigo_municipio"], "355030")
 
     def test_sao_paulo_districts_count(self):
         # We have a large list of known districts
@@ -103,22 +111,17 @@ class TestMultiCityLocalityAliases(unittest.TestCase):
         self.assertGreater(len(sp["bairros"]), 80)
 
     def test_localidade_aliases_now_multi_city(self):
-        self.assertIn("copacabana", LOCALITY_ALIASES)
-        rio_alias = LOCALITY_ALIASES["copacabana"]
-        self.assertEqual(rio_alias["municipio_resolvido"], "Rio de Janeiro")
-        self.assertEqual(rio_alias["estado"], "RJ")
-        self.assertEqual(rio_alias["codigo_municipio"], "330455")
-
-        self.assertIn("savassi", LOCALITY_ALIASES)
-        bh_alias = LOCALITY_ALIASES["savassi"]
-        self.assertEqual(bh_alias["municipio_resolvido"], "Belo Horizonte")
-        self.assertEqual(bh_alias["estado"], "MG")
-
-        self.assertIn("boa viagem", LOCALITY_ALIASES)
-        rec_alias = LOCALITY_ALIASES["boa viagem"]
-        self.assertEqual(rec_alias["municipio_resolvido"], "Recife")
-        self.assertEqual(rec_alias["estado"], "PE")
-        self.assertEqual(rec_alias["codigo_municipio"], "261160")
+        for nome, municipio, uf in (
+            ("copacabana", "Rio de Janeiro", "RJ"),
+            ("savassi", "Belo Horizonte", "MG"),
+            ("boa viagem", "Recife", "PE"),
+        ):
+            self.assertIn(nome, LOCALITY_ALIASES)
+            alias = LOCALITY_ALIASES[nome][0]
+            self.assertEqual(alias["municipio_resolvido"], municipio)
+            self.assertEqual(alias["estado"], uf)
+        self.assertEqual(LOCALITY_ALIASES["copacabana"][0]["codigo_municipio"], "330455")
+        self.assertEqual(LOCALITY_ALIASES["boa viagem"][0]["codigo_municipio"], "261160")
 
     def test_resolve_locality_alias_supports_other_cities(self):
         alias = resolve_locality_alias("ipanema", "")
@@ -169,7 +172,7 @@ class TestMultiCityLocalityAliases(unittest.TestCase):
         self.assertIn("Boa Viagem", data["bairros"])
 
     def test_sp_backward_compatibility_preserved(self):
-        alias = LOCALITY_ALIASES.get("perus")
+        alias = LOCALITY_ALIASES["perus"][0]
         self.assertEqual(alias["codigo_municipio"], "355030")
         self.assertEqual(alias["estado"], "SP")
         sp_direct = get_supported_bairros(uf="SP", municipio="São Paulo")

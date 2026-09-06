@@ -118,3 +118,21 @@ a.link-card:hover {
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 14px;
 }
+
+
+/* Lista de exemplos clicaveis de busca. Estava como style inline no Python,
+   com cores da paleta slate que nao pertencem ao sistema de tokens. */
+.token-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.token-list code {
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--soft);
+  font-size: .84rem;
+}

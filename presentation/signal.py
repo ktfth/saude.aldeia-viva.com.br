@@ -94,7 +94,7 @@ def render_signal_strip(
 def render_strip_legend() -> str:
     """Legenda da tira. Uma linha, quatro itens, sem painel próprio."""
     items = "".join(
-        f'<span><i style="background:{SOURCE_COLORS[key]}"></i>{escape(label)}</span>'
+        f'<span><i class="swatch-{key}"></i>{escape(label)}</span>'
         for key, label in (
             ("atual", "fonte deste ano"),
             ("recente", "ano anterior"),

@@ -121,30 +121,70 @@ def normalize_alias_key(value: str) -> str:
     return normalize_text(value)
 
 
-def build_locality_aliases() -> dict[str, dict[str, str]]:
+def build_locality_aliases() -> dict[str, tuple[dict[str, str], ...]]:
+    """Tabela de nome normalizado para TODOS os municípios candidatos.
+
+    A versão anterior guardava um único candidato por nome
+    (`aliases[key] = {...}`), então um bairro homônimo entre cidades era
+    sobrescrito pela última cidade iterada. Medido: `penha` e `campo grande`
+    existem em São Paulo e no Rio, e o Rio vencia — de modo que
+    `municipio=penha&estado=SP` não devolvia nada, embora `/v1/bairros`
+    anunciasse `penha` na lista de São Paulo.
+
+    Os candidatos vêm ordenados por UF para que a mesma consulta devolva
+    sempre o mesmo município: ordem de iteração de dicionário não pode
+    decidir isso.
     """
-    Build the flat lookup table from the declarative CITY_NEIGHBORHOODS registry.
-    This is the single source of truth consumed by resolve_locality_alias.
-    Pure and immutable result.
-    """
-    aliases: dict[str, dict[str, str]] = {}
+    aliases: dict[str, list[dict[str, str]]] = {}
     for _city_key, city in CITY_NEIGHBORHOODS.items():
         for bairro in city["bairros"]:
             key = normalize_alias_key(bairro)
-            aliases[key] = {
-                "tipo": city["tipo"],
-                "localidade": bairro,
-                "municipio_resolvido": city["municipio"],
-                "codigo_municipio": city["codigo_municipio"],
-                "estado": city["uf"],
-                "granularidade_disponivel": "municipio",
-            }
-    return aliases
+            aliases.setdefault(key, []).append(
+                {
+                    "tipo": city["tipo"],
+                    "localidade": bairro,
+                    "municipio_resolvido": city["municipio"],
+                    "codigo_municipio": city["codigo_municipio"],
+                    "estado": city["uf"],
+                    "granularidade_disponivel": "municipio",
+                }
+            )
+    deduplicated: dict[str, tuple[dict[str, str], ...]] = {}
+    for key, candidates in aliases.items():
+        by_city: dict[str, dict[str, str]] = {}
+        for item in candidates:
+            # Uma grafia repetida dentro da mesma cidade é erro de cadastro,
+            # não ambiguidade: "Vila Sônia" aparece duas vezes na lista de
+            # São Paulo e inflava a contagem publicada em /v1/bairros.
+            by_city.setdefault(item["codigo_municipio"], item)
+        deduplicated[key] = tuple(
+            sorted(by_city.values(), key=lambda item: item["estado"])
+        )
+    return deduplicated
+
+
+def ambiguous_locality_names() -> list[str]:
+    """Nomes de bairro que existem em mais de uma cidade suportada."""
+    return sorted(
+        key for key, candidates in LOCALITY_ALIASES.items() if len(candidates) > 1
+    )
 
 
 # Flat lookup table — rebuilt automatically when CITY_NEIGHBORHOODS changes.
 # Backward compatible name and shape.
 LOCALITY_ALIASES = build_locality_aliases()
+
+
+def _unique_neighborhoods(bairros) -> list[str]:
+    """Lista ordenada sem grafias repetidas.
+
+    O registro de São Paulo trazia "Vila Sônia" duas vezes, o que fazia
+    /v1/bairros publicar 137 bairros quando existem 136 entradas reais.
+    """
+    seen: dict[str, str] = {}
+    for bairro in bairros:
+        seen.setdefault(normalize_alias_key(bairro), bairro)
+    return sorted(seen.values())
 
 
 def get_supported_bairros(
@@ -169,7 +209,7 @@ def get_supported_bairros(
                 continue
             if target_mun and normalize_alias_key(city["municipio"]) != target_mun:
                 continue
-            bairros_sorted = sorted(list(city["bairros"]))
+            bairros_sorted = _unique_neighborhoods(city["bairros"])
             return {
                 "tipo": city["tipo"],
                 "uf": city["uf"],
@@ -190,10 +230,14 @@ def get_supported_bairros(
             }
 
     # Default: rich grouped view (recommended for agents and /agentes page)
+    # `total_bairros` conta entradas por cidade e por isso soma nomes
+    # homônimos duas vezes; `total_nomes_distintos` conta nomes únicos.
+    # Publicar os dois evita que um consumidor conclua que existem 137 nomes
+    # buscáveis quando são 134, três deles precisando de UF.
     cidades: list[dict[str, Any]] = []
     total_bairros = 0
     for city_key, city in CITY_NEIGHBORHOODS.items():
-        bairros_sorted = sorted(list(city["bairros"]))
+        bairros_sorted = _unique_neighborhoods(city["bairros"])
         total_bairros += len(bairros_sorted)
         cidades.append({
             "uf": city["uf"],
@@ -204,7 +248,18 @@ def get_supported_bairros(
             "total": len(bairros_sorted),
         })
 
+    ambiguos = ambiguous_locality_names()
+
     return {
+        "total_nomes_distintos": len(LOCALITY_ALIASES),
+        "nomes_ambiguos": ambiguos,
+        "aviso_ambiguidade": (
+            "Estes nomes existem em mais de uma cidade suportada. Informe o "
+            "parâmetro `estado` para escolher; sem ele a resposta traz o bloco "
+            "`filtro_localidade.ambiguidade` com as alternativas."
+        )
+        if ambiguos
+        else None,
         "versao": 2,
         "total_cidades": len(cidades),
         "total_bairros": total_bairros,
@@ -236,14 +291,7 @@ def resolve_locality_alias(
 
     normalized = normalize_text(query)
 
-    # Tenta match direto
-    alias = LOCALITY_ALIASES.get(normalized)
-    if alias:
-        if state_filter and alias["estado"] != state_filter:
-            return None
-        return {"consulta": query, **alias}
-
-    # Tenta variações comuns usadas por agentes
+    # Variações comuns usadas por agentes, na ordem de tentativa.
     variations = [
         normalized,
         normalized.replace("bairro ", ""),
@@ -255,11 +303,38 @@ def resolve_locality_alias(
     ]
 
     for variant in variations:
-        alias = LOCALITY_ALIASES.get(variant)
-        if alias:
-            if state_filter and alias["estado"] != state_filter:
+        candidates = LOCALITY_ALIASES.get(variant)
+        if not candidates:
+            continue
+
+        if state_filter:
+            # A UF desambigua. Sem isto, um bairro homônimo resolvia para a
+            # cidade errada e a consulta com a UF certa vinha vazia.
+            matching = [item for item in candidates if item["estado"] == state_filter]
+            if not matching:
                 continue
-            return {"consulta": query, **alias}
+            return {"consulta": query, **matching[0]}
+
+        chosen = dict(candidates[0])
+        if len(candidates) > 1:
+            # Sem UF a escolha é arbitrária; declarar é melhor que esconder.
+            chosen["ambiguidade"] = [
+                {
+                    "municipio": item["municipio_resolvido"],
+                    "estado": item["estado"],
+                    "codigo_municipio": item["codigo_municipio"],
+                }
+                for item in candidates
+            ]
+            outras = ", ".join(
+                f"{item['municipio_resolvido']}/{item['estado']}"
+                for item in candidates[1:]
+            )
+            chosen["aviso"] = (
+                f"O nome {query!r} também existe em {outras}. "
+                "Informe o parâmetro `estado` para escolher."
+            )
+        return {"consulta": query, **chosen}
 
     return None
 
