@@ -16,3 +16,6 @@ data/usage.jsonl
 
 # Override de composição local, por máquina.
 docker-compose.override.yml
+
+# Saida de execucao de testes de navegador.
+test-results/

@@ -1,7 +1,6 @@
-# O snapshot embarcado ja carrega os 5.339 municipios; as copias em JSON
-# somariam 34 MB ao bundle sem acrescentar dado nenhum.
-data/reports
-api/data
+# `bundled_report_snapshot.py` ja carrega a base inteira. As copias em JSON
+# que estas regras excluiam somavam 34 MB e nao eram lidas por codigo nenhum;
+# foram removidas do repositorio. A regra do cache local permanece.
 .cache
 
 # Nada disto e executado em producao.

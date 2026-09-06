@@ -15,7 +15,21 @@ geographic drill-down, saved views, etc.).
 from typing import Any, Iterable, Mapping
 
 from domain.disease_sources import DISEASE_SOURCES
-from domain.risk import RISK_FORMULA  # used in some metadata paths
+from domain.risk import (  # RISK_FORMULA usado em alguns caminhos de metadata
+    RISK_FORMULA,
+    RISK_LEVEL_ORDER,
+)
+
+# Severidade por nível, DERIVADA da ordem declarada no domínio.
+#
+# Aqui havia uma segunda tabela escrita à mão. Duas listas do mesmo fato
+# divergem em silêncio, e esta divergiria da pior forma possível:
+# `.get(nivel, -1)` faz um nível desconhecido ser EXCLUÍDO de todo filtro,
+# sem erro e sem aviso. Acrescentar um nível ao domínio e esquecer daqui
+# produziria um filtro que simplesmente nunca o devolve.
+SEVERIDADE_DO_NIVEL = {
+    nivel: indice for indice, nivel in enumerate(reversed(RISK_LEVEL_ORDER))
+}
 
 from .utils import clean_value, normalize_text
 
@@ -366,8 +380,7 @@ def with_locality_alias(
 
 
 def level_at_least(level: str, minimum: str) -> bool:
-    order = {"baixo": 0, "moderado": 1, "alto": 2, "critico": 3}
-    return order.get(level, -1) >= order.get(minimum, -1)
+    return SEVERIDADE_DO_NIVEL.get(level, -1) >= SEVERIDADE_DO_NIVEL.get(minimum, -1)
 
 
 def displayed_level(row: Mapping[str, Any]) -> str:

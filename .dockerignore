@@ -17,10 +17,13 @@ docker-compose*.yml
 data/users.json
 
 # Cache local de execucao. Sem isto a imagem herdava os 42 MB da maquina de
-# quem construiu, e o container carregava o relatorio DAQUELE cache em vez do
-# snapshot versionado em `data/reports` -- a imagem deixava de ser
-# reproduzivel. Verificado: sem o cache, o container sobe pelo snapshot
-# embarcado.
+# quem construiu, e o container carregava o relatorio DAQUELE cache -- a
+# imagem deixava de ser reproduzivel. Verificado no log do container: sem o
+# cache, ele sobe por `bundled_report_snapshot.py`.
+#
+# Correcao de uma afirmacao errada que estava aqui: a versao anterior deste
+# comentario dizia que o fallback era `data/reports`. Nao era. Aquele
+# diretorio nao era lido por codigo nenhum, e foi removido.
 .cache
 data/usage.jsonl
 

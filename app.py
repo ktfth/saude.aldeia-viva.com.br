@@ -1,3 +1,4 @@
+from collections import Counter
 import csv
 import gzip
 import hashlib
@@ -31,6 +32,7 @@ from domain.disease_sources import (
 )
 from domain.risk import (
     RISK_FORMULA,
+    RISK_LEVEL_ORDER,
     RISK_PROFILES,
     RiskProfile,
     finalize_disease_summary,
@@ -62,7 +64,10 @@ from aggregation.utils import normalize_text
 # Ingestion layer extraction in progress (Fase 0).
 from ingestion.municipality_lookup import load_municipality_lookup
 from aggregation.recency_enrichment import enrich_report
-from aggregation.population_enrichment import enrich_with_population
+from aggregation.population_enrichment import (
+    MIN_RELIABLE_POPULATION,
+    enrich_with_population,
+)
 from aggregation.case_composition import with_case_composition
 from aggregation.signal_coverage import (
     describe_coverage as describe_signal_gap,
@@ -1361,7 +1366,10 @@ def render_explanation_page(request: Request) -> str:
     )
     recencia = db_metadata.get("recencia") or {}
     populacao = db_metadata.get("populacao") or {}
-    minimo = populacao.get("populacao_minima_confiavel") or 10_000
+    # O literal repetia `MIN_RELIABLE_POPULATION`: mudar a constante deixaria
+    # esta página mostrando o número antigo quando o metadata não trouxesse
+    # a chave.
+    minimo = populacao.get("populacao_minima_confiavel") or MIN_RELIABLE_POPULATION
     atuais = recencia.get("agravos_com_fonte_do_ano_corrente")
     total_agravos = recencia.get("agravos_total")
 
@@ -1612,18 +1620,31 @@ def render_dashboard_rows(rows: Iterable[Mapping[str, Any]]) -> str:
     )
 
 
+# Como cada nível se apresenta ao leitor. Rótulo e marcador são decisão de
+# interface, não de domínio, e por isso moram aqui — mas o CONJUNTO de níveis
+# é do domínio, e `tests/test_single_authority.py` exige que estas tabelas
+# cubram `RISK_LEVEL_ORDER` inteiro. Sem isso, um nível novo chegaria ao
+# usuário com o código cru no lugar do rótulo, sem nada falhar.
+ROTULO_DO_NIVEL = {
+    "critico": "Crítico",
+    "alto": "Alto",
+    "moderado": "Moderado",
+    "baixo": "Baixo",
+}
+
+MARCADOR_DO_NIVEL = {
+    "critico": "●",
+    "alto": "▲",
+    "moderado": "◆",
+    "baixo": "●",
+}
+
+
 def render_badge(value: Any) -> str:
     raw_label = clean_value(value) or "baixo"
     level = normalize_text(raw_label)
-    label = {
-        "critico": "Crítico",
-        "alto": "Alto",
-        "moderado": "Moderado",
-        "baixo": "Baixo",
-    }.get(level, raw_label)
-    marker = {"critico": "●", "alto": "▲", "moderado": "◆", "baixo": "●"}.get(
-        level, "●"
-    )
+    label = ROTULO_DO_NIVEL.get(level, raw_label)
+    marker = MARCADOR_DO_NIVEL.get(level, "●")
     return f'<span class="badge {level}">{marker} {escape_html(label)}</span>'
 
 
@@ -2453,6 +2474,8 @@ async def get_professional_report(
 
     rows = filter_risk_index(db_clini, municipio=municipio, estado=estado)
 
+    contagem_por_nivel = Counter(row["nivel_risco"] for row in rows)
+
     # Add advanced analytics for Professional tier
     summary = {
         "total_municipios": len(rows),
@@ -2461,11 +2484,13 @@ async def get_professional_report(
         "media_risk_score": round(sum(r["risk_score"] for r in rows) / len(rows), 2)
         if rows
         else 0,
+        # Percorre os níveis que o domínio declara, e não uma lista escrita
+        # aqui: um nível acrescentado ao domínio e esquecido nesta chave
+        # sumiria da distribuição em silêncio, e as contagens deixariam de
+        # somar o total. De quebra, uma passada em vez de quatro sobre os
+        # 5.408 municípios.
         "distribuicao_risco": {
-            "critico": len([r for r in rows if r["nivel_risco"] == "critico"]),
-            "alto": len([r for r in rows if r["nivel_risco"] == "alto"]),
-            "moderado": len([r for r in rows if r["nivel_risco"] == "moderado"]),
-            "baixo": len([r for r in rows if r["nivel_risco"] == "baixo"]),
+            nivel: contagem_por_nivel.get(nivel, 0) for nivel in RISK_LEVEL_ORDER
         },
     }
 
