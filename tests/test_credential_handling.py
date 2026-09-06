@@ -386,16 +386,56 @@ class TestUsageLogNeverBreaksTheRequest(unittest.TestCase):
     falhar ao contar não pode custar a resposta.
     """
 
-    def test_a_read_only_destination_does_not_raise(self) -> None:
+    def _tracker(self) -> "app.UsageTracker":
+        """Tracker real, num diretório temporário.
+
+        Antes montado com `__new__` e dois atributos atribuídos à mão, o que
+        o acoplava aos campos privados da classe: acrescentar um campo
+        quebrava o teste sem que nada de verdade tivesse mudado.
+        """
+        import tempfile
         from pathlib import Path
+
+        destino = Path(tempfile.mkdtemp(prefix="av-uso-")) / "usage.jsonl"
+        return app.UsageTracker(destino)
+
+    def test_a_read_only_destination_does_not_raise(self) -> None:
         from unittest.mock import patch
 
-        tracker = app.UsageTracker.__new__(app.UsageTracker)
-        tracker.log_path = Path("/caminho/somente/leitura/usage.jsonl")
-        tracker._lock = threading.Lock()
-
+        tracker = self._tracker()
         with patch("builtins.open", side_effect=OSError("read-only file system")):
             tracker.log_usage("anonymous", "/v1/risk-index", "GET", 200)
+
+    def test_desiste_do_arquivo_em_vez_de_tentar_a_cada_requisicao(self) -> None:
+        """Repetir o aviso a cada chamada afogaria o dreno em produção."""
+        from unittest.mock import patch
+
+        tracker = self._tracker()
+        with patch("builtins.open", side_effect=OSError("read-only")) as aberto:
+            tracker.log_usage("anonymous", "/v1/a", "GET", 200)
+            tracker.log_usage("anonymous", "/v1/b", "GET", 200)
+            tracker.log_usage("anonymous", "/v1/c", "GET", 200)
+        self.assertEqual(aberto.call_count, 1)
+
+    def test_a_contagem_segue_pela_saida_padrao(self) -> None:
+        """O canal que sobrevive em serverless. Sem ele, demanda é invisível."""
+        import json
+        from unittest.mock import patch
+
+        tracker = self._tracker()
+        with patch("builtins.open", side_effect=OSError("read-only")):
+            with self.assertLogs("uso", level="INFO") as capturado:
+                tracker.log_usage("uma-chave", "/v1/risk-index", "GET", 200)
+
+        (linha,) = capturado.output
+        self.assertIn(app.USAGE_LOG_PREFIX, linha)
+        registro = json.loads(linha[linha.index("{"):])
+        self.assertEqual(registro["path"], "/v1/risk-index")
+        self.assertEqual(registro["status_code"], 200)
+        self.assertNotIn(
+            "uma-chave", linha, "a chave crua não pode aparecer no log"
+        )
+        self.assertTrue(registro["api_key"].startswith("key:"))
 
     def test_the_endpoint_answers_even_when_logging_fails(self) -> None:
         from unittest.mock import patch

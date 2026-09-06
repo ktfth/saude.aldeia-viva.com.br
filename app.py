@@ -276,17 +276,46 @@ def key_fingerprint(api_key: str) -> str:
     return "key:" + hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
 
 
+# Prefixo estável para o dreno de logs filtrar. Mudá-lo quebra qualquer
+# consulta de uso já montada em cima dele.
+USAGE_LOG_PREFIX = "USO"
+
+usage_logger = logging.getLogger("uso")
+
+
 class UsageTracker:
+    """Contagem de uso por cliente, em dois canais.
+
+    O canal em arquivo era o único, e em produção ele não existe: na Vercel o
+    disco é somente leitura fora de `/tmp`, e `vercel.json` não define
+    `USAGE_LOG_PATH`. A escrita falhava, o `try/except` engolia, e o servico
+    seguia respondendo — SEM REGISTRAR UMA ÚNICA REQUISIÇÃO desde que subiu.
+    Apontar para `/tmp` também não resolveria: container serverless é efêmero,
+    então log em arquivo é arquiteturalmente incapaz de medir demanda ali.
+
+    Isto importa além de analytics. Com o produto sendo uma API para embarcar
+    em software de terceiros, contar chamadas É o mecanismo de cobrança: não
+    se fatura por uso o que não se consegue contar.
+
+    O canal primário passa a ser a saída padrão, que a plataforma captura e
+    drena. O arquivo continua para desenvolvimento local, e desiste sozinho
+    quando o disco não aceita — sem repetir o aviso a cada requisição, que em
+    produção afogaria o próprio dreno.
+    """
+
     def __init__(self, log_path: Path):
         self.log_path = log_path
+        self._file_available = True
+        self._warned_once = False
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as error:
-            # Em produção na Vercel o disco é somente leitura fora de /tmp.
-            # Não poder criar o diretório de log não pode impedir o serviço
-            # de subir.
+            self._file_available = False
             logger.warning(
-                "Diretório do log de uso indisponível (%s): %s", log_path, error
+                "Log de uso em arquivo indisponível (%s): %s. A contagem "
+                "segue pela saída padrão.",
+                log_path,
+                error,
             )
         # RateLimiter já tinha lock; este não tinha, e escritas concorrentes
         # de processos com múltiplas threads podiam intercalar linhas.
@@ -300,17 +329,30 @@ class UsageTracker:
             "method": method,
             "status_code": status_code,
         }
-        line = json.dumps(entry) + "\n"
+        linha = json.dumps(entry, ensure_ascii=False)
+
+        # Canal primário: sobrevive a disco somente leitura e a container
+        # efêmero. É por aqui que a demanda passa a ser observável.
+        usage_logger.info("%s %s", USAGE_LOG_PREFIX, linha)
+
+        if not self._file_available:
+            return
         try:
             with self._lock:
                 with open(self.log_path, "a", encoding="utf-8") as handle:
-                    handle.write(line)
+                    print(linha, file=handle)
         except OSError as error:
             # Contar requisições é telemetria; falhar ao contar não pode custar
-            # a resposta. Em produção na Vercel o disco é somente leitura fora
-            # de /tmp, e a exceção derrubava TODA rota /v1/* com 500 enquanto
+            # a resposta. A exceção derrubava TODA rota /v1/* com 500 enquanto
             # /dashboard respondia normalmente.
-            logger.warning("Não foi possível registrar uso: %s", error)
+            self._file_available = False
+            if not self._warned_once:
+                self._warned_once = True
+                logger.warning(
+                    "Log de uso em arquivo desativado (%s). A contagem segue "
+                    "pela saída padrão.",
+                    error,
+                )
 
 
 class RateLimiter:
