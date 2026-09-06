@@ -19,6 +19,18 @@ from aggregation.recency_enrichment import (
 
 REF = date(2026, 9, 5)
 
+# Horizonte por agravo usado pelos testes desta suíte. Ver test_source_age.py
+# para a razão de o frescor ser medido contra a fonte de cada agravo.
+HORIZONS = {"MENI": date(2022, 12, 30), "DENG": date(2026, 8, 30)}
+
+
+def enrich_one(municipality, reference=REF, horizons=None):
+    return enrich_municipality(municipality, horizons or HORIZONS, reference, reference)
+
+
+def enrich_one_alert(alert, reference=REF, horizons=None):
+    return enrich_alert(alert, horizons or HORIZONS, reference, reference)
+
 
 def _municipality(**overrides):
     base = {
@@ -40,47 +52,57 @@ def _municipality(**overrides):
 
 class TestEnrichMunicipality(unittest.TestCase):
     def test_every_disease_gets_recency(self) -> None:
-        got = enrich_municipality(_municipality(), REF)
+        got = enrich_one(_municipality())
         for disease in got["doencas"]:
             self.assertIn("recencia", disease)
 
     def test_doencas_altas_also_enriched(self) -> None:
-        got = enrich_municipality(_municipality(), REF)
-        self.assertEqual(got["doencas_altas"][0]["recencia"]["frescor"], "fossil")
+        got = enrich_one(_municipality())
+        self.assertEqual(got["doencas_altas"][0]["recencia"]["frescor"], "vivo")
+        self.assertEqual(got["doencas_altas"][0]["fonte"]["ano"], 2022)
 
     def test_municipality_recency_uses_freshest_disease(self) -> None:
         """O município herda o sinal mais vivo que possui — é ele que aciona."""
-        got = enrich_municipality(_municipality(), REF)
+        got = enrich_one(_municipality())
         self.assertEqual(got["recencia"]["frescor"], "vivo")
         self.assertEqual(got["recencia"]["data"], "2026-08-30")
 
     def test_municipality_without_diseases_is_unknown(self) -> None:
-        got = enrich_municipality(_municipality(doencas=[], doencas_altas=[]), REF)
+        got = enrich_one(_municipality(doencas=[], doencas_altas=[]))
         self.assertEqual(got["recencia"]["frescor"], "desconhecido")
 
     def test_does_not_mutate_input(self) -> None:
         original = _municipality()
-        enrich_municipality(original, REF)
+        enrich_one(original)
         self.assertNotIn("recencia", original)
         self.assertNotIn("recencia", original["doencas"][0])
 
-    def test_counts_live_diseases(self) -> None:
-        got = enrich_municipality(_municipality(), REF)
-        self.assertEqual(got["agravos_com_sinal_vivo"], 1)
+    def test_counts_live_diseases_and_current_sources(self) -> None:
+        """Ambos os agravos notificaram até o fim da SUA fonte: 2 sinais vivos.
+        Mas só um deles tem fonte do ano corrente — é essa contagem que diz
+        quanto do painel do município descreve o presente."""
+        got = enrich_one(_municipality())
+        self.assertEqual(got["agravos_com_sinal_vivo"], 2)
+        self.assertEqual(got["agravos_com_fonte_atual"], 1)
         self.assertEqual(got["agravos_total"], 2)
 
 
 class TestEnrichAlert(unittest.TestCase):
-    def test_alert_gets_recency(self) -> None:
-        got = enrich_alert(
-            {"doenca": "Meningite", "ultima_notificacao": "2022-12-30"}, REF
+    def test_alert_gets_recency_against_its_own_source(self) -> None:
+        """Meningite notificada até o fim da fonte de 2022: viva NA FONTE.
+        A idade da fonte é publicada à parte, em `fonte`."""
+        got = enrich_one_alert(
+            {"codigo_doenca": "MENI", "doenca": "Meningite",
+             "ultima_notificacao": "2022-12-30"}
         )
-        self.assertEqual(got["recencia"]["frescor"], "fossil")
-        self.assertFalse(got["recencia"]["confiavel_como_atual"])
+        self.assertEqual(got["recencia"]["frescor"], "vivo")
+        self.assertEqual(got["fonte"]["ano"], 2022)
+        self.assertFalse(got["fonte"]["do_ano_corrente"])
 
     def test_does_not_mutate_input(self) -> None:
-        original = {"doenca": "Dengue", "ultima_notificacao": "2026-09-01"}
-        enrich_alert(original, REF)
+        original = {"codigo_doenca": "DENG", "doenca": "Dengue",
+                    "ultima_notificacao": "2026-09-01"}
+        enrich_one_alert(original)
         self.assertNotIn("recencia", original)
 
 
@@ -117,8 +139,6 @@ class TestEnrichReport(unittest.TestCase):
         # A referência do sinal é o horizonte do dado, não a data de hoje.
         self.assertEqual(rec["referencia"], "2026-08-30")
         self.assertEqual(rec["horizonte_dado"], "2026-08-30")
-        self.assertEqual(rec["alertas"]["fossil"], 1)
-        self.assertEqual(rec["alertas_confiaveis_como_atuais"], 0)
         self.assertEqual(rec["alertas_total"], 1)
 
     def test_tolerates_missing_collections(self) -> None:
@@ -153,8 +173,10 @@ class TestTwoClocks(unittest.TestCase):
         return {
             "municipios": [_municipality()],
             "alertas_altos": [
-                {"doenca": "Dengue", "ultima_notificacao": "2026-08-30"},
-                {"doenca": "Meningite", "ultima_notificacao": "2022-12-30"},
+                {"codigo_doenca": "DENG", "doenca": "Dengue",
+                 "ultima_notificacao": "2026-08-30"},
+                {"codigo_doenca": "MENI", "doenca": "Meningite",
+                 "ultima_notificacao": "2022-12-30"},
             ],
             "metadata": {"status": "ok", "carregado_em": "2026-08-31T00:00:00+00:00"},
         }
@@ -164,15 +186,17 @@ class TestTwoClocks(unittest.TestCase):
         self.assertEqual(got["metadata"]["recencia"]["horizonte_dado"], "2026-08-30")
 
     def test_signal_age_is_measured_against_the_horizon_not_today(self) -> None:
-        """Um agravo que notificou até o fim da carga está vivo NA CARGA."""
+        """Um agravo que notificou até o fim da fonte está vivo NA FONTE."""
         got = enrich_report(self._report(), self.TODAY)
         dengue = got["alertas_altos"][0]
         self.assertEqual(dengue["recencia"]["idade_dias"], 0)
         self.assertEqual(dengue["recencia"]["frescor"], "vivo")
 
-    def test_fossil_inside_the_load_is_still_fossil(self) -> None:
+    def test_each_alert_is_measured_against_its_own_source(self) -> None:
         got = enrich_report(self._report(), self.TODAY)
-        self.assertEqual(got["alertas_altos"][1]["recencia"]["frescor"], "fossil")
+        meningite = got["alertas_altos"][1]
+        self.assertEqual(meningite["recencia"]["frescor"], "vivo")
+        self.assertEqual(meningite["fonte"]["ano"], 2022)
 
     def test_load_age_is_reported_separately(self) -> None:
         carga = enrich_report(self._report(), self.TODAY)["metadata"]["carga"]
@@ -201,8 +225,10 @@ class TestTwoClocks(unittest.TestCase):
 
     def test_explicit_horizon_wins_over_detection(self) -> None:
         got = enrich_report(self._report(), self.TODAY, horizon=date(2026, 9, 5))
-        self.assertEqual(got["metadata"]["recencia"]["horizonte_dado"], "2026-09-05")
-        self.assertEqual(got["alertas_altos"][0]["recencia"]["idade_dias"], 6)
+        # `horizonte_dado` continua sendo o que o dado contém de fato;
+        # o override muda apenas a referência efetiva de medição.
+        self.assertEqual(got["metadata"]["recencia"]["horizonte_dado"], "2026-08-30")
+        self.assertEqual(got["metadata"]["recencia"]["referencia"], "2026-09-05")
 
     def test_empty_report_has_no_horizon_but_still_reports_load(self) -> None:
         got = enrich_report({"metadata": {}}, self.TODAY)
