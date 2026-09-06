@@ -464,7 +464,19 @@ SITE_DESCRIPTION = (
     "doenças, agravos e agentes como Dengue, Chikungunya, Zika, Febre Amarela, "
     "Leptospirose e Meningite no Brasil."
 )
-PUBLIC_PATHS = ("/dashboard", "/sobre", "/agentes", "/docs", "/openapi.json")
+# Rotas anunciadas no sitemap.xml. Toda página que aparece na navegação
+# precisa estar aqui: `/planos` ficou de fora desde sempre — justamente a
+# página onde alguém pede uma chave e onde está o preço. Medido em
+# 2026-09-06, a busca pelo domínio não devolve nada, e a página de conversão
+# nem era oferecida ao rastreador.
+PUBLIC_PATHS = (
+    "/dashboard",
+    "/sobre",
+    "/planos",
+    "/agentes",
+    "/docs",
+    "/openapi.json",
+)
 
 
 # build_source_url and build_dbc_source_url moved to ingestion/sinan_loader.py (Fase 0)
