@@ -5,8 +5,8 @@
       "maxDuration": 60
     }
   },
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index" }
+  "routes": [
+    { "src": "/(.*)", "dest": "/api/index.py" }
   ],
   "env": {
     "SINAN_CACHE_DIR": "/tmp/datasus",
