@@ -1221,6 +1221,32 @@ def breadcrumb_json_ld(request: Request, name: str, path: str) -> dict[str, Any]
     }
 
 
+def agent_freshness() -> dict[str, Any]:
+    """Bloco de frescor legível por máquina.
+
+    Antes expunha apenas `status`, `loaded_at`, `period` e `cache` — nada que
+    permitisse a um agente decidir se podia afirmar que um número descreve o
+    presente. Agora carrega os três relógios do sistema.
+    """
+    recency = db_metadata.get("recencia") or {}
+    load = db_metadata.get("carga") or {}
+    return {
+        "status": db_metadata.get("status"),
+        "loaded_at": db_metadata.get("carregado_em"),
+        "load_age_days": load.get("idade_dias"),
+        "is_current": load.get("atualizada", False),
+        "warning": load.get("aviso"),
+        "period": db_metadata.get("periodo"),
+        "data_horizon": recency.get("horizonte_dado"),
+        "total_sources": recency.get("agravos_total"),
+        "current_year_sources": recency.get("agravos_com_fonte_do_ano_corrente"),
+        "sources_by_year": recency.get("fontes_por_ano"),
+        "sources": recency.get("fontes"),
+        "freshness_definition": recency.get("definicao"),
+        "cache": db_metadata.get("cache"),
+    }
+
+
 def agent_manifest(request: Request) -> dict[str, Any]:
     base = public_base_url(request)
     return {
@@ -1228,12 +1254,36 @@ def agent_manifest(request: Request) -> dict[str, Any]:
         "description": SITE_DESCRIPTION,
         "language": "pt-BR",
         "base_url": base,
-        "freshness": {
-            "status": db_metadata.get("status"),
-            "loaded_at": db_metadata.get("carregado_em"),
-            "period": db_metadata.get("periodo"),
-            "cache": db_metadata.get("cache"),
+        "freshness": agent_freshness(),
+        "limits": {
+            "anonymous": {
+                "max_results": TIER_MAX_LIMIT["anonymous"],
+                "rate_limit_per_minute": 10,
+            },
+            "free": {"max_results": TIER_MAX_LIMIT["free"]},
+            "note": (
+                "Sem cabeçalho X-API-Key, `limite` é rebaixado silenciosamente ao teto "
+                "do tier anônimo. Leia os cabeçalhos de resposta para saber se houve corte."
+            ),
+            "response_headers": {
+                "X-Total-Results": "total de registros que satisfazem o filtro",
+                "X-Returned-Results": "quantos vieram nesta resposta",
+                "X-Limit-Applied": "teto efetivamente aplicado",
+            },
         },
+        "interpretation": [
+            "Cada agravo traz `fonte.ano`: o ano do arquivo SINAN de onde ele veio. "
+            "O relatório é uma colcha de anos — não assuma que `periodo.ano` descreve o agravo.",
+            "Cada agravo traz `recencia.frescor`, medido contra o horizonte da PRÓPRIA fonte. "
+            "`vivo` significa que o município notificou até o fim daquele arquivo, "
+            "não que o fato seja de hoje.",
+            "Antes de afirmar que algo é a situação atual, verifique `fonte.do_ano_corrente` "
+            "e `metadata.carga.atualizada`. Um agravo `vivo` com `fonte.ano` de 2022 é dado de 2022.",
+            "`metadata.carga.idade_dias` diz há quantos dias o serviço não busca dados novos. "
+            "É falha operacional do serviço, não fato epidemiológico sobre os municípios.",
+            "`risk_score` é soma ponderada de contagens absolutas, sem denominador populacional. "
+            "Ordenar por ele aproxima uma ordenação por população; não o leia como incidência.",
+        ],
         "recommended_use": [
             "Use /v1/high-alerts para priorizar municípios com doenças em nível alto ou crítico.",
             "Use /v1/risk-index para explicar o contexto completo por município.",
@@ -1244,6 +1294,9 @@ def agent_manifest(request: Request) -> dict[str, Any]:
             "A granularidade pública processada é municipal.",
             "Consultas por distrito ou bairro podem ser resolvidas para o município correspondente quando houver alias conhecido.",
             "Alguns DBCs grandes, como ANIM, são suportados mas podem exigir habilitação explícita por SINAN_DISEASE_CODES.",
+            "O relatório reúne arquivos-fonte de anos diferentes por agravo; "
+            "consulte fonte.ano em cada um antes de datar uma afirmação.",
+            "Não há população municipal na base, logo não há taxa por 100 mil habitantes.",
             "Os dados não substituem vigilância epidemiológica oficial ou investigação local.",
         ],
         "endpoints": {
@@ -1256,6 +1309,7 @@ def agent_manifest(request: Request) -> dict[str, Any]:
                 "method": "GET",
                 "description": "Índice enriquecido por município com doenças, vírus, score e classificação.",
                 "query": [
+                    "ano",
                     "municipio",
                     "estado",
                     "somente_altos",
@@ -1339,30 +1393,63 @@ def catalog_source_url(source: DiseaseSource) -> str:
 
 
 def llms_text(request: Request) -> str:
+    """Instruções para LLMs.
+
+    Reescrito em pt-BR (o resto do produto sempre foi) e corrigido: a versão
+    anterior afirmava que bairro só era resolvido em São Paulo, quando o
+    código suporta SP, RJ, MG e PE — e não dizia uma palavra sobre a idade
+    das fontes nem sobre o teto silencioso de resultados.
+    """
     base = public_base_url(request)
+    load = db_metadata.get("carga") or {}
+    recency = db_metadata.get("recencia") or {}
+    age = load.get("idade_dias")
+    idade = f"{age} dia(s)" if age is not None else "idade desconhecida"
+    current = recency.get("agravos_com_fonte_do_ano_corrente")
+    total = recency.get("agravos_total")
+    teto = TIER_MAX_LIMIT["anonymous"]
     return f"""# {SITE_NAME}
 
 {SITE_DESCRIPTION}
 
-Use /v1/high-alerts for high and critical epidemiological alerts by municipality, disease and virus.
-Use /v1/risk-index for enriched municipal risk context and explanation fields.
-Use /v1/diseases to discover supported diseases and source freshness.
-Use /v1/bairros to see supported neighborhoods in SP, RJ, MG and PE (resolved to municipality). Add ?uf=RJ to filter.
-Use /v1/metadata for data freshness, source URLs and the risk formula.
+Endpoints:
+- /v1/high-alerts — alertas altos e críticos por município, doença e vírus.
+- /v1/risk-index — índice enriquecido por município. Aceita `ano` para carregar outro ano.
+- /v1/diseases — catálogo de agravos suportados.
+- /v1/bairros — bairros e distritos resolvidos para município em SP, RJ, MG e PE. Filtre com ?uf=RJ.
+- /v1/metadata — estado da carga, fontes, fórmula do score e os blocos temporais.
 
 Base URL: {base}
 OpenAPI: {base}/openapi.json
-Agent manifest: {base}/agent.json
-Human dashboard: {base}/dashboard
-Methodology: {base}/sobre
+Manifesto para agentes: {base}/agent.json
+Painel humano: {base}/dashboard
+Metodologia: {base}/sobre
 
-Important interpretation rules:
-- Public processed granularity is municipal.
-- When `filtro_localidade` appears, the original query was made using a neighborhood (bairro) or district name. Currently, this resolution is mainly supported for São Paulo city districts. The data returned is always at the municipal level.
-- Do not infer district-level or neighborhood-level case counts from municipal data.
-- Risk formula: {RISK_FORMULA}
-- Each disease entry includes formula_risco; do not assume one universal formula for all diseases.
-- Data does not replace official epidemiological surveillance or local investigation.
+Estado atual desta instância:
+- Carga com {idade}.
+- {current if current is not None else "?"} de {total if total is not None else "?"} agravos com arquivo-fonte do ano corrente.
+
+Regras de interpretação (leia antes de afirmar qualquer coisa):
+- A granularidade pública processada é municipal. Não infira contagem por bairro ou distrito.
+- `filtro_localidade` indica que a consulta usou nome de bairro ou distrito; o dado
+  devolvido continua sendo municipal.
+- Cada agravo traz `fonte.ano`: o ano do arquivo SINAN de onde ele veio. O relatório reúne
+  anos diferentes por agravo, e `periodo.ano` apenas repete o ano solicitado — não o tome
+  como o ano do dado.
+- Cada agravo traz `recencia.frescor`, medido contra o horizonte da própria fonte.
+  `vivo` quer dizer que o município notificou até o fim daquele arquivo, não que o fato
+  seja de hoje. Um agravo `vivo` com `fonte.ano` igual a 2022 continua sendo dado de 2022.
+- `metadata.carga.idade_dias` mede há quanto tempo o serviço não busca dados novos.
+  É falha operacional do serviço, não fato epidemiológico sobre os municípios.
+- `risk_score` é soma ponderada de contagens absolutas, sem denominador populacional:
+  {RISK_FORMULA}
+  Ordenar por ele aproxima uma ordenação por população; não o leia como incidência.
+  Não há população na base, logo não há taxa por 100 mil habitantes.
+- Cada agravo tem `formula_risco` própria; não assuma uma fórmula única para todos.
+- Sem cabeçalho X-API-Key, o parâmetro `limite` é rebaixado ao teto anônimo ({teto}
+  resultados). Leia X-Total-Results, X-Returned-Results e X-Limit-Applied para saber
+  se a resposta foi cortada.
+- Os dados não substituem vigilância epidemiológica oficial nem investigação local.
 """
 
 
@@ -1599,6 +1686,7 @@ async def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "data_status": db_metadata.get("status"),
+        "carga": db_metadata.get("carga"),
         "loaded_at": db_metadata.get("carregado_em"),
         "cache": db_metadata.get("cache"),
     }

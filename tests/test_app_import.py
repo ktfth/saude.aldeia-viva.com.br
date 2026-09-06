@@ -413,7 +413,9 @@ class AppImportTest(unittest.TestCase):
         self.assertIn("/v1/high-alerts", manifest.json()["endpoints"])
         self.assertIn("/v1/diseases", manifest.json()["endpoints"])
         self.assertEqual(llms.status_code, 200)
-        self.assertIn("Use /v1/high-alerts", llms.text)
+        # llms.txt foi reescrito em pt-BR, como o resto do produto.
+        self.assertIn("/v1/high-alerts", llms.text)
+        self.assertIn("Regras de interpreta", llms.text)
 
     def test_diseases_endpoint_lists_supported_sources(self) -> None:
         seed_web_globals()
