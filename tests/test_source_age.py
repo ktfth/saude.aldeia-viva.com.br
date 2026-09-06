@@ -152,3 +152,85 @@ class TestPerDiseaseRecency(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCurrentSourceRiskLevel(unittest.TestCase):
+    """O nível que responde "devo agir hoje?".
+
+    `nivel_risco` consolida os agravos de todos os anos-fonte: mede gravidade
+    histórica e, medido no dado real, deixa 23,5% dos 5.339 municípios em
+    "crítico". `nivel_risco_fonte_atual` olha só os agravos cujo arquivo é do
+    ano corrente e cai para 8,8% — porque separa gravidade de cobertura em
+    vez de misturar as duas num indicador só.
+
+    Os dois convivem de propósito. Um município crítico apenas por um arquivo
+    de 2022 continua sendo crítico na história e não é ação para hoje.
+    """
+
+    TODAY = date(2026, 9, 5)
+
+    def _report(self):
+        return {
+            "municipios": [
+                {
+                    "codigo_municipio": "355030",
+                    "municipio": "São Paulo",
+                    "estado": "SP",
+                    "nivel_risco": "critico",
+                    "doencas": [
+                        {
+                            "codigo": "MENI",
+                            "nome": "Meningite",
+                            "nivel_risco": "critico",
+                            "ultima_notificacao": "2022-12-30",
+                        },
+                        {
+                            "codigo": "DENG",
+                            "nome": "Dengue",
+                            "nivel_risco": "moderado",
+                            "ultima_notificacao": "2026-04-21",
+                        },
+                    ],
+                    "doencas_altas": [],
+                }
+            ],
+            "alertas_altos": [],
+            "metadata": {},
+        }
+
+    def test_current_source_level_ignores_old_source_diseases(self) -> None:
+        got = enrich_report(self._report(), self.TODAY)["municipios"][0]
+        self.assertEqual(got["nivel_risco"], "critico")
+        self.assertEqual(got["nivel_risco_fonte_atual"], "moderado")
+
+    def test_declares_when_history_is_worse_than_the_present(self) -> None:
+        """A UI precisa saber quando o histórico é pior, para não esconder."""
+        got = enrich_report(self._report(), self.TODAY)["municipios"][0]
+        self.assertTrue(got["historico_mais_grave"])
+
+    def test_no_flag_when_both_agree(self) -> None:
+        report = self._report()
+        report["municipios"][0]["doencas"][0]["ultima_notificacao"] = "2026-04-20"
+        got = enrich_report(report, self.TODAY)["municipios"][0]
+        self.assertEqual(got["nivel_risco_fonte_atual"], "critico")
+        self.assertFalse(got["historico_mais_grave"])
+
+    def test_municipality_without_current_sources_is_baixo(self) -> None:
+        report = self._report()
+        report["municipios"][0]["doencas"] = [
+            {
+                "codigo": "MENI",
+                "nome": "Meningite",
+                "nivel_risco": "critico",
+                "ultima_notificacao": "2022-12-30",
+            }
+        ]
+        got = enrich_report(report, self.TODAY)["municipios"][0]
+        self.assertEqual(got["nivel_risco_fonte_atual"], "baixo")
+        self.assertEqual(got["agravos_com_fonte_atual"], 0)
+
+    def test_metadata_reports_both_distributions(self) -> None:
+        rec = enrich_report(self._report(), self.TODAY)["metadata"]["recencia"]
+        self.assertEqual(rec["niveis_fonte_atual"]["moderado"], 1)
+        self.assertEqual(rec["niveis_fonte_atual"]["critico"], 0)
+        self.assertEqual(rec["municipios_com_historico_mais_grave"], 1)

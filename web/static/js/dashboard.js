@@ -71,6 +71,26 @@ function badge(value) {
   return `<span class="badge ${level}">${marker} ${escapeHtml(label)}</span>`;
 }
 
+/**
+ * Célula de risco: o nível acionável, com o histórico dito quando pior.
+ *
+ * O badge mostra `nivel_risco_fonte_atual` — o pior nível entre os agravos
+ * de fonte do ano corrente. Usar o nível consolidado de todos os anos-fonte
+ * deixava 1.296 dos 5.339 municípios em "crítico"; restringir leva a 468.
+ * Os que saem estavam lá por Meningite de 2022 ou Leptospirose de 2024.
+ * Nada some: quando o histórico é pior, a célula diz qual era.
+ */
+function riskCell(item) {
+  const level = item.nivel_risco_fonte_atual || item.nivel_risco;
+  let html = badge(level);
+  if (item.historico_mais_grave) {
+    html += `<span class="cell-sub risk-history"
+      title="Nível considerando também agravos de fontes de anos anteriores"
+      >histórico: ${escapeHtml(item.nivel_risco)}</span>`;
+  }
+  return html + `<span class="cell-sub">${signalTag(item.recencia)}</span>`;
+}
+
 function signalTag(recencia) {
   const level = (recencia && recencia.frescor) || 'desconhecido';
   const label = (recencia && recencia.rotulo) || 'sem data';
@@ -157,8 +177,7 @@ function renderRows(items) {
         <td data-label="Município"><strong>${escapeHtml(item.municipio)}</strong>
           <span class="cell-sub">${sub}</span>
           <span class="cell-sub">${resumo}</span></td>
-        <td data-label="Risco">${badge(item.nivel_risco)}
-          <span class="cell-sub">${signalTag(item.recencia)}</span></td>
+        <td data-label="Risco">${riskCell(item)}</td>
         <td data-label="Casos" class="num"><strong>${fmt.format(item.total_casos_provaveis || 0)}</strong>
           <span class="cell-sub">${obitosHtml}</span></td>
         <td data-label="Agravos">${signalStrip(item.doencas, year)}</td>
@@ -218,8 +237,11 @@ function showMunicipioDetail(item) {
   const cobertura = total != null
     ? ` · ${atuais} de ${total} agravos com fonte do ano corrente`
     : '';
+  const historico = item.historico_mais_grave
+    ? ` · histórico: ${item.nivel_risco}`
+    : '';
   document.getElementById('detail-municipio-subtitle').textContent =
-    `Código ${item.codigo_municipio}${cobertura}`;
+    `Código ${item.codigo_municipio}${cobertura}${historico}`;
 
   document.getElementById('detail-summary').innerHTML = `
     <div class="stat-item"><span class="stat-label">Casos prováveis</span>

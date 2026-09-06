@@ -146,6 +146,15 @@
   color: var(--fonte-antiga);
 }
 
+/* Histórico pior que o presente. Discreto de propósito: é contexto, não
+   chamado à ação — mas nunca omitido, porque em 54,5% dos municípios o
+   nível consolidado de todos os anos-fonte é mais grave que o atual. */
+.risk-history {
+  font-variant: small-caps;
+  letter-spacing: .02em;
+  opacity: .85;
+}
+
 @media (max-width: 640px) {
   .signal-strip { max-width: 100%; }
   .data-status { font-size: .8rem; }

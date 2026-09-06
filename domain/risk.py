@@ -106,6 +106,25 @@ RISK_PROFILES: dict[str, RiskProfile] = {
 RISK_FORMULA = RISK_PROFILES["arbovirus"].formula
 
 
+# Do mais grave ao menos grave. Usado para consolidar o nível de um
+# conjunto de agravos sem reaplicar fórmula alguma sobre a soma.
+RISK_LEVEL_ORDER = ("critico", "alto", "moderado", "baixo")
+
+
+def worst_level(levels) -> str:
+    """Pior nível entre os informados.
+
+    Um município não tem perfil de risco — cada agravo tem. Consolidar pelo
+    pior nível preserva o perfil correto de cada agravo, em vez de aplicar o
+    perfil de arbovirose a uma soma que mistura agravos e anos-fonte.
+    """
+    seen = {level for level in levels if level in RISK_LEVEL_ORDER}
+    for level in RISK_LEVEL_ORDER:
+        if level in seen:
+            return level
+    return "baixo"
+
+
 def risk_profile_for_source(source: "DiseaseSource") -> RiskProfile:
     """Return the appropriate RiskProfile for a given disease source."""
     return RISK_PROFILES.get(source.risk_profile, RISK_PROFILES["arbovirus"])

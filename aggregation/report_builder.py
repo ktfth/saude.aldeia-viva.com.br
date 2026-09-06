@@ -18,8 +18,8 @@ from domain.rates import incidence_per_100k
 from domain.risk import (
     RISK_FORMULA,
     finalize_disease_summary,
-    risk_level,
     risk_profile_for_source,
+    worst_level,
 )
 
 from .utils import (
@@ -89,7 +89,15 @@ def create_municipality_summary(
     }
 
 
-def create_disease_summary(source, year: int) -> dict[str, Any]:
+def create_disease_summary(
+    source, year: int, source_year: int | None = None
+) -> dict[str, Any]:
+    """Resumo vazio de um agravo.
+
+    `periodo.ano` passa a ser o ano do arquivo-fonte de fato usado, não o ano
+    solicitado. O relatório reúne anos diferentes por agravo — carimbar o ano
+    pedido em todos fazia a Meningite de 2022 se apresentar como dado de 2026.
+    """
     return {
         "codigo": source.codigo,
         "nome": source.nome,
@@ -97,7 +105,10 @@ def create_disease_summary(source, year: int) -> dict[str, Any]:
         "tipo": source.tipo,
         "perfil_risco": source.risk_profile,
         "formula_risco": risk_profile_for_source(source).formula,
-        "periodo": {"ano": year},
+        "periodo": {
+            "ano": source_year if source_year is not None else year,
+            "ano_solicitado": year,
+        },
         "total_notificacoes": 0,
         "casos_provaveis": 0,
         "casos_descartados": 0,
@@ -191,11 +202,12 @@ def finalize_municipality_rows(
         municipality["risk_score"] = round(
             sum(disease["risk_score"] for disease in diseases), 2
         )
-        municipality["nivel_risco"] = risk_level(
-            municipality["risk_score"],
-            municipality["total_casos_provaveis"],
-            municipality["total_casos_graves"],
-            municipality["total_obitos"],
+        # Pior nível entre os agravos, cada um já calculado com o seu próprio
+        # perfil. A versão anterior aplicava o perfil de arbovirose à soma de
+        # até 10 agravos e 5 anos-fonte: 24,3% dos 5.339 municípios saíam
+        # como "crítico" e a variável deixava de discriminar.
+        municipality["nivel_risco"] = worst_level(
+            disease["nivel_risco"] for disease in diseases
         )
         municipality["taxa_incidencia_100k"] = incidence_per_100k(
             municipality["total_casos_provaveis"],
@@ -211,8 +223,10 @@ def build_epidemiology_report(
     *,
     year: int,
     municipality_lookup: Mapping[str, Mapping[str, str]] | None = None,
+    source_years: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     lookup = municipality_lookup or {}
+    years_by_source = source_years or {}
     municipalities: dict[str, dict[str, Any]] = {}
     skipped_records = 0
 
@@ -234,7 +248,10 @@ def build_epidemiology_report(
                 ),
             )
             disease = municipality["doencas_por_codigo"].setdefault(
-                source.codigo, create_disease_summary(source, year)
+                source.codigo,
+                create_disease_summary(
+                    source, year, years_by_source.get(source.codigo)
+                ),
             )
             add_record_to_summaries(disease, municipality, source, record)
 
@@ -293,6 +310,40 @@ def _extract_municipality_code(record: Mapping[str, Any]) -> str:
     return ""
 
 
-def _state_from_record(record: Mapping[str, Any]) -> str:
-    # Simplified version - the real UF mapping logic lives in app.py for now
-    return clean_value(record.get("SG_UF", "")).upper()
+# Código IBGE de UF para sigla. O SINAN entrega `SG_UF` e os dois primeiros
+# dígitos do código municipal como número, não como sigla.
+UF_CODE_TO_ABBR = {
+    "11": "RO", "12": "AC", "13": "AM", "14": "RR", "15": "PA", "16": "AP",
+    "17": "TO", "21": "MA", "22": "PI", "23": "CE", "24": "RN", "25": "PB",
+    "26": "PE", "27": "AL", "28": "SE", "29": "BA", "31": "MG", "32": "ES",
+    "33": "RJ", "35": "SP", "41": "PR", "42": "SC", "43": "RS", "50": "MS",
+    "51": "MT", "52": "GO", "53": "DF",
+}
+
+UF_ABBREVIATIONS = frozenset(UF_CODE_TO_ABBR.values())
+
+
+def state_from_record(record: Mapping[str, Any]) -> str:
+    """UF do registro, tolerando código numérico ou sigla.
+
+    A versão anterior fazia `.upper()` em `SG_UF` e devolvia "35" como se
+    fosse uma UF. A lógica correta existia em app.py e nunca esteve no
+    caminho do relatório, então todo município fora do lookup do IBGE saía
+    com um número no lugar da sigla.
+    """
+    code = _digits(_extract_municipality_code(record))
+    if len(code) >= 2 and code[:2] in UF_CODE_TO_ABBR:
+        return UF_CODE_TO_ABBR[code[:2]]
+
+    raw = clean_value(record.get("SG_UF", "")).strip().upper()
+    if raw in UF_ABBREVIATIONS:
+        return raw
+    return UF_CODE_TO_ABBR.get(_digits(raw), "")
+
+
+def _digits(value: Any) -> str:
+    return "".join(char for char in clean_value(value) if char.isdigit())
+
+
+# Nome anterior mantido para os chamadores internos deste módulo.
+_state_from_record = state_from_record

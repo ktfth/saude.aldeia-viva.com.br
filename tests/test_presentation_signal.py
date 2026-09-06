@@ -12,6 +12,7 @@ import unittest
 
 from presentation.signal import (
     render_data_status,
+    render_risk_cell,
     render_signal_strip,
     render_signal_tag,
     render_source_tag,
@@ -157,6 +158,52 @@ class TestRenderDataStatus(unittest.TestCase):
         html = render_data_status({})
         self.assertIn("data-status", html)
 
+
+
+class TestRenderRiskCell(unittest.TestCase):
+    """A célula de risco mostra o nível acionável, sem esconder o histórico.
+
+    Medido no dado real: usar o nível consolidado de todos os anos-fonte
+    deixava 1.296 dos 5.339 municípios em "crítico". Restringir aos agravos
+    de fonte do ano corrente leva a 468 — e 828 municípios saíam do topo
+    porque o "crítico" deles vinha de Meningite de 2022 ou Leptospirose de
+    2024. Esses 828 não podem simplesmente sumir: em 54,5% dos municípios o
+    histórico é mais grave que o presente, e isso precisa estar dito.
+    """
+
+    def _row(self, atual="alto", historico="critico", mais_grave=True):
+        return {
+            "nivel_risco": historico,
+            "nivel_risco_fonte_atual": atual,
+            "historico_mais_grave": mais_grave,
+            "recencia": {"frescor": "vivo", "rotulo": "ontem"},
+        }
+
+    def test_badge_uses_the_current_source_level(self) -> None:
+        html = render_risk_cell(self._row(), lambda level: f"[{level}]")
+        self.assertIn("[alto]", html)
+        self.assertNotIn("[critico]", html)
+
+    def test_declares_the_worse_history_instead_of_hiding_it(self) -> None:
+        html = render_risk_cell(self._row(), lambda level: f"[{level}]")
+        self.assertIn("histórico", html.lower())
+        self.assertIn("critico", html)
+
+    def test_stays_quiet_when_history_matches_the_present(self) -> None:
+        html = render_risk_cell(
+            self._row(atual="critico", historico="critico", mais_grave=False),
+            lambda level: f"[{level}]",
+        )
+        self.assertNotIn("histórico", html.lower())
+
+    def test_falls_back_to_nivel_risco_when_the_new_field_is_absent(self) -> None:
+        """Dados antigos, sem enriquecimento, não podem quebrar a página."""
+        html = render_risk_cell({"nivel_risco": "moderado"}, lambda level: f"[{level}]")
+        self.assertIn("[moderado]", html)
+
+    def test_includes_the_signal_tag(self) -> None:
+        html = render_risk_cell(self._row(), lambda level: f"[{level}]")
+        self.assertIn("signal-tag", html)
 
 if __name__ == "__main__":
     unittest.main()

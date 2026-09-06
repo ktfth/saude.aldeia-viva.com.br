@@ -183,3 +183,32 @@ def sort_diseases_for_strip(
             str(item.get("nome") or ""),
         ),
     )
+
+
+def render_risk_cell(row: Mapping[str, Any], badge_renderer) -> str:
+    """Célula de risco: o nível acionável, com o histórico dito quando pior.
+
+    O badge mostra `nivel_risco_fonte_atual` — o pior nível entre os agravos
+    cujo arquivo-fonte é do ano corrente. É ele que responde "devo agir hoje?".
+
+    Medido no dado real: usar o nível consolidado de todos os anos-fonte
+    deixava 1.296 dos 5.339 municípios em "crítico"; restringir à fonte atual
+    leva a 468. Os 828 que saem do topo estavam lá por Meningite de 2022 ou
+    Leptospirose de 2024 — história, não ação de hoje.
+
+    Nada é escondido: em 54,5% dos municípios o histórico é mais grave, e
+    nesses casos a célula diz qual era o nível e por quê.
+    """
+    level = row.get("nivel_risco_fonte_atual") or row.get("nivel_risco")
+    parts = [badge_renderer(level)]
+
+    if row.get("historico_mais_grave"):
+        historico = escape(str(row.get("nivel_risco") or ""))
+        parts.append(
+            f'<span class="cell-sub risk-history" '
+            f'title="Nível considerando também agravos de fontes de anos anteriores">'
+            f"histórico: {historico}</span>"
+        )
+
+    parts.append(f'<span class="cell-sub">{render_signal_tag(row.get("recencia"))}</span>')
+    return "".join(parts)

@@ -28,6 +28,7 @@ comportamento de município algum.
 from datetime import date
 from typing import Any, Iterable, Mapping
 
+from domain.risk import RISK_LEVEL_ORDER, worst_level
 from domain.recency import (
     FRESHNESS_ORDER,
     LIVE,
@@ -171,10 +172,38 @@ def enrich_municipality(
     enriched["agravos_com_sinal_vivo"] = sum(
         1 for item in diseases if item["recencia"]["frescor"] == LIVE
     )
-    enriched["agravos_com_fonte_atual"] = sum(
-        1 for item in diseases if item["fonte"]["do_ano_corrente"]
+    current = [item for item in diseases if item["fonte"]["do_ano_corrente"]]
+    enriched["agravos_com_fonte_atual"] = len(current)
+
+    # `nivel_risco` consolida todos os anos-fonte: é gravidade histórica.
+    # Este aqui olha só o que temos de atual, e é o que responde "devo agir
+    # hoje?". Medido no dado real: 23,5% de "crítico" contra 8,8%.
+    enriched["nivel_risco_fonte_atual"] = worst_level(
+        item.get("nivel_risco") for item in current
+    )
+    enriched["historico_mais_grave"] = _is_more_severe(
+        municipality.get("nivel_risco"), enriched["nivel_risco_fonte_atual"]
     )
     return enriched
+
+
+def _is_more_severe(level: Any, reference: Any) -> bool:
+    """True quando `level` é estritamente mais grave que `reference`."""
+    if level not in RISK_LEVEL_ORDER or reference not in RISK_LEVEL_ORDER:
+        return False
+    return RISK_LEVEL_ORDER.index(level) < RISK_LEVEL_ORDER.index(reference)
+
+
+def current_source_level_distribution(
+    municipalities: Iterable[Mapping[str, Any]],
+) -> dict[str, int]:
+    """Distribuição do nível restrito a fontes do ano corrente."""
+    counts = {level: 0 for level in RISK_LEVEL_ORDER}
+    for municipality in municipalities:
+        level = municipality.get("nivel_risco_fonte_atual")
+        if level in counts:
+            counts[level] += 1
+    return counts
 
 
 def freshness_distribution(items: Iterable[Mapping[str, Any]]) -> dict[str, int]:
@@ -258,6 +287,10 @@ def enrich_report(
             1 for alert in alerts if alert["recencia"]["confiavel_como_atual"]
         ),
         "municipios": freshness_distribution(municipalities),
+        "niveis_fonte_atual": current_source_level_distribution(municipalities),
+        "municipios_com_historico_mais_grave": sum(
+            1 for item in municipalities if item.get("historico_mais_grave")
+        ),
         "agravos_total": len(sources),
         "agravos_com_fonte_do_ano_corrente": sum(
             1 for source in sources.values() if source["do_ano_corrente"]

@@ -60,6 +60,7 @@ from ingestion.municipality_lookup import load_municipality_lookup
 from aggregation.recency_enrichment import enrich_report
 from presentation.signal import (
     render_data_status,
+    render_risk_cell,
     render_signal_strip,
     render_signal_tag,
     render_strip_legend,
@@ -291,10 +292,17 @@ def fetch_epidemiology_report(year: int = DEFAULT_YEAR) -> dict[str, Any]:
         key=lambda item: source_order.get(clean_value(item.get("codigo")), 999)
     )
 
+    # O ano real de cada fonte ja era conhecido aqui e so ia para o metadata.
+    # Agora chega ao builder, para que cada agravo carimbe o proprio ano.
     report = build_epidemiology_report(
         records_by_disease,
         year=year,
         municipality_lookup=load_municipality_lookup(),
+        source_years={
+            clean_value(item["codigo"]): item["ano"]
+            for item in sources
+            if item.get("ano") is not None
+        },
     )
     report["metadata"]["fontes"] = sources
     report["metadata"]["erros"] = errors
@@ -1073,8 +1081,7 @@ def render_dashboard_rows(rows: Iterable[Mapping[str, Any]]) -> str:
             f'<td data-label="Município"><strong>{nome}</strong>'
             f'<span class="cell-sub">{sub}</span>'
             f'<span class="cell-sub">{resumo}</span></td>'
-            f'<td data-label="Risco">{render_badge(row.get("nivel_risco"))}'
-            f'<span class="cell-sub">{render_signal_tag(row.get("recencia"))}</span></td>'
+            f'<td data-label="Risco">{render_risk_cell(row, render_badge)}</td>'
             f'<td data-label="Casos" class="num"><strong>{format_number(row.get("total_casos_provaveis"))}</strong>'
             f'<span class="cell-sub">{obitos_html}</span></td>'
             f'<td data-label="Agravos">{strip}</td>'
@@ -1283,6 +1290,11 @@ def agent_manifest(request: Request) -> dict[str, Any]:
             "É falha operacional do serviço, não fato epidemiológico sobre os municípios.",
             "`risk_score` é soma ponderada de contagens absolutas, sem denominador populacional. "
             "Ordenar por ele aproxima uma ordenação por população; não o leia como incidência.",
+            "`nivel_risco` consolida os agravos de TODOS os anos-fonte: é gravidade histórica. "
+            "`nivel_risco_fonte_atual` olha só os agravos cujo arquivo é do ano corrente e é o "
+            "que responde 'exige ação agora?'. No dado atual: 24,3% contra 8,8% de 'crítico'.",
+            "`historico_mais_grave` indica que o município já esteve em nível pior por conta de "
+            "agravos de fontes antigas. Use para contexto, nunca para priorizar ação de hoje.",
         ],
         "recommended_use": [
             "Use /v1/high-alerts para priorizar municípios com doenças em nível alto ou crítico.",
