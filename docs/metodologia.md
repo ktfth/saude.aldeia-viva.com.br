@@ -59,6 +59,27 @@ Entram no cálculo, com pesos que variam por agravo:
 
 `formula_risco` acompanha cada agravo e explica o cálculo daquele caso.
 
+### Nem toda fórmula usa todos os termos
+
+A fonte de cada agravo traz campos diferentes. Verificado nos arquivos reais:
+`ZIKABR26.csv` tem 38 colunas e **nenhuma** de sinal de alarme ou gravidade;
+`DENGBR26.csv` tem 121, com 24 delas.
+
+Quando a fonte não traz o campo, o termo correspondente da fórmula fica
+**sempre zero**. Medido nesta carga, oito dos dez agravos têm alguma lacuna —
+o score da Zika, por exemplo, é na prática apenas a contagem de casos, ainda
+que a fórmula impressa ao lado liste cinco termos.
+
+`doencas[].sinais_sem_dados` declara isso em cada agravo, e
+`metadata.cobertura_de_sinais` resume por agravo.
+
+Duas consequências:
+
+- **Scores de agravos com lacunas diferentes não são comparáveis entre si.**
+- Um zero em `sinais_alarme`, `casos_graves`, `hospitalizacoes` ou `obitos`
+  pode significar "não houve" ou "a fonte não traz". Consulte a lista antes de
+  afirmar ausência.
+
 ## Como o nível de risco nasce
 
 Cada agravo tem o seu nível, calculado com o seu próprio perfil. O nível do
@@ -100,7 +121,8 @@ municípios. Por isso os três são publicados separadamente.
 - `nivel_risco_fonte_atual` prioriza ação de hoje
 - `doencas_altas` mostra o que está elevando o município
 - `fonte.ano` data a afirmação
-- `formula_risco` explica o cálculo daquele agravo
+- `formula_risco` explica o cálculo daquele agravo, e `sinais_sem_dados` diz
+  quais termos dele a fonte não alimenta
 
 ## Limitações
 

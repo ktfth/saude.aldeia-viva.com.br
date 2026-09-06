@@ -132,6 +132,27 @@ function sourceBucket(fonte, currentYear) {
   return currentYear - Number(fonte.ano) <= 1 ? 'recente' : 'antiga';
 }
 
+const SIGNAL_LABELS = {
+  sinais_alarme: 'sinais de alarme',
+  casos_graves: 'casos graves',
+  hospitalizacoes: 'hospitalizações',
+  obitos: 'óbitos',
+};
+
+/**
+ * Termos da fórmula que a fonte deste agravo não alimenta.
+ *
+ * Sem isto, um zero em `casos_graves` parece "não houve" quando na verdade a
+ * fonte não traz a coluna. A Zika publica a fórmula de cinco termos e tem
+ * quatro sem dados: o score dela é a contagem de casos.
+ */
+function signalGapNote(disease) {
+  const gaps = disease.sinais_sem_dados || [];
+  if (!gaps.length) return '';
+  const nomes = gaps.map((g) => SIGNAL_LABELS[g] || g).join(', ');
+  return `<span class="cell-sub signal-gap" title="A fonte deste agravo não traz estes campos; o termo correspondente da fórmula fica sempre zero.">sem dados: ${escapeHtml(nomes)}</span>`;
+}
+
 function sourceTag(fonte) {
   if (!fonte || fonte.ano == null) return '<span class="source-tag is-old">sem fonte</span>';
   const old = fonte.do_ano_corrente ? '' : ' is-old';
@@ -284,7 +305,8 @@ function showMunicipioDetail(item) {
   tbody.innerHTML = doencas.map((d) => `
     <tr>
       <td><strong>${escapeHtml(d.nome)}</strong>
-        <span class="cell-sub">${escapeHtml(d.virus || '')}</span></td>
+        <span class="cell-sub">${escapeHtml(d.virus || '')}</span>
+        ${signalGapNote(d)}</td>
       <td>${sourceTag(d.fonte)}</td>
       <td>${signalTag(d.recencia)}</td>
       <td class="num">${fmt.format(d.casos_provaveis || 0)}</td>

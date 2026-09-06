@@ -62,6 +62,10 @@ from aggregation.utils import normalize_text
 from ingestion.municipality_lookup import load_municipality_lookup
 from aggregation.recency_enrichment import enrich_report
 from aggregation.population_enrichment import enrich_with_population
+from aggregation.signal_coverage import (
+    describe_coverage as describe_signal_gap,
+    with_signal_coverage,
+)
 from aggregation.ordering import ORDERINGS, sort_municipalities
 from aggregation.cache_policy import (
     DEFAULT_MAX_AGE_DAYS,
@@ -526,6 +530,10 @@ def apply_report_state(
     # dele, nem um número absoluto sem saber sobre quantos habitantes.
     enriched = enrich_report({**report, "metadata": metadata}, signal_reference_date())
     enriched = enrich_with_population(enriched, cached_population_lookup())
+    # Declara quais termos da formula a fonte de cada agravo nao alimenta.
+    # Sem isto, um zero que significa "a fonte nao traz" fica indistinguivel
+    # de um zero que significa "nao houve".
+    enriched = with_signal_coverage(enriched)
 
     db_clini = list(enriched.get("municipios") or [])
     db_alertas = list(enriched.get("alertas_altos") or [])
@@ -1134,6 +1142,25 @@ def render_plans_page(request: Request) -> str:
     )
 
 
+def render_signal_gaps() -> str:
+    """Lista, por agravo, os termos da fórmula que a fonte não alimenta."""
+    cobertura = db_metadata.get("cobertura_de_sinais") or {}
+    por_agravo = cobertura.get("por_agravo") or {}
+    linhas = []
+    for codigo, faltando in sorted(por_agravo.items()):
+        if not faltando:
+            continue
+        fonte = DISEASE_SOURCES.get(codigo)
+        nome = fonte.nome if fonte else codigo
+        linhas.append(
+            f"<strong>{escape_html(nome)}</strong>: sem "
+            f"{escape_html(describe_signal_gap(faltando))}"
+        )
+    if not linhas:
+        return "Nesta carga, todos os agravos trazem todos os sinais."
+    return "Nesta carga: " + "; ".join(linhas) + "."
+
+
 def render_explanation_page(request: Request) -> str:
     """Página de metodologia.
 
@@ -1182,6 +1209,11 @@ def render_explanation_page(request: Request) -> str:
       <p>Cada agravo tem o seu próprio perfil de risco e o seu próprio nível. O nível do município é o <strong>pior nível entre os agravos</strong> dele — não há fórmula aplicada sobre a soma, porque somar dez agravos e cinco anos-fonte num só número deixava 24,3% dos municípios em "crítico" e a variável parava de discriminar.</p>
       <p><code>nivel_risco</code> considera todos os anos-fonte: é gravidade histórica. <code>nivel_risco_fonte_atual</code> olha só os agravos cujo arquivo é do ano corrente, e é ele que responde "exige ação agora?". Quando o histórico é mais grave, o painel diz.</p>
       <ul>{formula_rows}</ul>
+
+      <h2>Nem toda fórmula usa todos os termos</h2>
+      <p>A fonte de cada agravo traz campos diferentes. O arquivo da Zika tem 38 colunas e nenhuma de sinal de alarme ou gravidade; o da Dengue tem 121, com 24 delas. Quando a fonte não traz o campo, o termo correspondente da fórmula fica <strong>sempre zero</strong> — e o score da Zika acaba sendo, na prática, apenas a contagem de casos.</p>
+      <p>{render_signal_gaps()}</p>
+      <p><code>doencas[].sinais_sem_dados</code> declara isso em cada agravo. <strong>Scores de agravos com lacunas diferentes não são comparáveis entre si</strong>, ainda que a fórmula impressa ao lado seja a mesma. E um zero nesses campos pode significar "não houve" ou "a fonte não traz": consulte a lista antes de afirmar ausência.</p>
 
       <h2>Três relógios, que não podem ser confundidos</h2>
       <ul>
@@ -1556,6 +1588,7 @@ def agent_freshness() -> dict[str, Any]:
         "sources_by_year": recency.get("fontes_por_ano"),
         "sources": recency.get("fontes"),
         "freshness_definition": recency.get("definicao"),
+        "signal_coverage": db_metadata.get("cobertura_de_sinais"),
         "cache": db_metadata.get("cache"),
     }
 
@@ -1617,6 +1650,13 @@ def agent_manifest(request: Request) -> dict[str, Any]:
             "correlaciona 0,82 com a população e responde 'onde há mais casos', não 'onde é pior'.",
             "`incidencia.confiavel` é falso quando a população é pequena demais para a taxa ser "
             "estável. Nesse caso publique o número com a ressalva, nunca sozinho.",
+            "`doencas[].sinais_sem_dados` lista os termos da `formula_risco` que a fonte daquele "
+            "agravo não alimenta — eles ficam sempre zero. A Zika, por exemplo, publica a fórmula "
+            "de cinco termos e tem quatro sem dados: o score dela é a contagem de casos. "
+            "Scores de agravos com lacunas diferentes NÃO são comparáveis entre si.",
+            "Um zero em `sinais_alarme`, `casos_graves`, `hospitalizacoes` ou `obitos` pode "
+            "significar 'não houve' ou 'a fonte não traz'. Consulte `sinais_sem_dados` antes de "
+            "afirmar ausência.",
         ],
         "recommended_use": [
             "Use /v1/high-alerts para priorizar municípios com doenças em nível alto ou crítico.",

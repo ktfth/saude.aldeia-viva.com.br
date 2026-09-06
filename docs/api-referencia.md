@@ -95,6 +95,11 @@ curl "http://127.0.0.1:8000/v1/risk-index?ordenar=taxa&limite=10&pagina=2"
   reúne anos diferentes; não presuma que `periodo.ano` vale para todos.
 - `doencas[].recencia` — até quando o município notificou, medido **dentro**
   da fonte daquele agravo.
+- `doencas[].sinais_sem_dados` — termos da `formula_risco` que a fonte daquele
+  agravo não alimenta, e que ficam sempre zero. Oito dos dez agravos têm
+  alguma lacuna. Scores de agravos com lacunas diferentes **não são
+  comparáveis**, e um zero nesses campos pode significar "não houve" ou "a
+  fonte não traz".
 - `filtro_localidade` — presente quando a consulta usou nome de bairro. Se o
   nome existir em mais de uma cidade suportada e a UF não for informada,
   traz `ambiguidade` com as alternativas.
