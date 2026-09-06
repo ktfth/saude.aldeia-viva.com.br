@@ -1,6 +1,6 @@
 # Design System — Aldeia Viva Saúde
 
-**Versão:** 0.3 (reconstrução minimalista + dimensão temporal + denominador)
+**Versão:** 0.4 (minimalismo + dimensão temporal + denominador + carga viva)
 
 Este documento é a fonte da verdade para decisões visuais e de interface.  
 Objetivo: permitir melhorias sustentáveis sem que o projeto volte a parecer "vibe codado".
@@ -231,15 +231,41 @@ casos em produção. Enriquecer na entrada do relatório em memória faz o
 resultado valer para as três origens do dado — carga nova, cache em disco e
 snapshot embarcado — em vez de só depois de uma recarga completa.
 
+## O aviso tem que ter conserto
+
+A barra de estado dizia "carga de 132 dias" e nada no sistema jamais buscaria
+dado novo. Investigar a causa raiz revelou dois defeitos encadeados, e o
+segundo só apareceu porque o primeiro foi corrigido:
+
+1. A cache agregada decidia com `if cache_path.exists()` — era eterna por
+   construção, já que a chave é `(versão, ano, agravos)`.
+2. Com a expiração ligada, a primeira recarga real levantou
+   `NameError: load_latest_available_records`. A função tinha sido movida
+   para `ingestion/sinan_loader.py` na "Fase 0" deixando só um comentário; o
+   import nunca foi acrescentado. **O serviço era incapaz de buscar dado
+   novo desde aquele refactor** — e nunca falhou visivelmente porque a cache
+   não expirava e os testes de refresh mockavam a carga inteira.
+
+**Regra que sai daqui:** um aviso na interface sem caminho de conserto é
+dívida disfarçada de transparência. Se o painel diz que a carga está velha,
+alguma coisa no sistema tem que estar tentando renová-la — e essa tentativa
+precisa ser exercitada por teste, não presumida.
+
+Corolário para a suíte: `tests/__init__.py` desliga a expiração, senão cada
+`TestClient` baixaria as fontes do SINAN de verdade. A política em si é
+testada por parâmetro em `test_cache_freshness.py`.
+
 ## Dívida conhecida
 
-- `bundled_report_snapshot.py` tem 893 KB versionados no repositório.
-- A carga do SINAN não é reprocessada desde 2026-04-26; a barra de estado
-  diz isso ao usuário, mas o agendamento da recarga não existe.
-- `nivel_risco` histórico ainda deixa 23,5% dos municípios em "crítico".
-  O recorte por fonte atual resolve para a operação (8,8%), mas o número
-  histórico permanece pouco discriminante por natureza — ele agrega cinco
-  anos-fonte.
+- `bundled_report_snapshot.py` tem 893 KB versionados. **Avaliado e mantido**:
+  é fallback load-bearing (`app.py:482,500`), custo único de repositório, sem
+  dano evidenciado. A hipótese de removê-lo caiu por terra na medição.
+- `nivel_risco` histórico ainda deixa 23,5% dos municípios em "crítico". O
+  recorte por fonte atual resolve para a operação (8,8%), mas o número
+  histórico é pouco discriminante por natureza — ele agrega cinco anos-fonte.
+- As fontes DBC exigem `datasus-dbc` e `dbfread`, extensões nativas sem wheel
+  para toda versão de Python. Estão em `requirements.txt` e o erro no ponto de
+  uso é acionável, mas um ambiente sem elas carrega apenas as fontes CSV.
 
 ---
 
