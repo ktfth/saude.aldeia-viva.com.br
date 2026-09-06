@@ -394,8 +394,17 @@ class AppImportTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("SINAN/OpenDataSUS", response.text)
         self.assertIn(app.RISK_FORMULA, response.text)
-        self.assertIn("granularidade municipal", response.text.lower())
-        self.assertIn("Dados não substituem vigilância epidemiológica oficial", response.text)
+        # A página foi reescrita: a granularidade agora é afirmada como
+        # "sempre municipal". Ver tests/test_methodology_page.py para as
+        # asserções sobre o conteúdo metodológico em si.
+        texto = response.text.lower()
+        self.assertIn("granularidade", texto)
+        self.assertIn("municipal", texto)
+        # A ressalva continua na página, reescrita como "Não substituem
+        # vigilância epidemiológica oficial, investigação local, diagnóstico
+        # nem boletins oficiais."
+        self.assertIn("vigilância epidemiológica oficial", response.text)
+        self.assertIn("Subnotificação", response.text)
 
     def test_agents_page_and_agent_manifest_expose_consumption_contract(self) -> None:
         seed_web_globals()
@@ -581,7 +590,10 @@ class AppImportTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data_status"], "ok")
         self.assertEqual(app.db_clini[0]["municipio"], "São Paulo")
-        self.assertGreaterEqual(mocked.call_count, 2)
+        # O lifespan passou a ser idempotente (não reparseia 17 MB a cada
+        # TestClient), então a recarga aqui vem do MIDDLEWARE, que é o que
+        # este teste verifica: estado vazio em uma requisição é reidratado.
+        self.assertGreaterEqual(mocked.call_count, 1)
 
     def test_robots_and_sitemap_advertise_public_pages(self) -> None:
         seed_web_globals()

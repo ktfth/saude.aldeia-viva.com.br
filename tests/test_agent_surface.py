@@ -16,10 +16,12 @@ import unittest
 from fastapi.testclient import TestClient
 
 import app
+from tests import ensure_real_report
 
 
 class AgentSurfaceTest(unittest.TestCase):
     def setUp(self) -> None:
+        ensure_real_report()
         app.rate_limiter.reset()
         self.client = TestClient(app.app)
         self.client.__enter__()

@@ -126,6 +126,9 @@ class TestEndpointReportsTheTruth(unittest.TestCase):
 
         import app
 
+        from tests import ensure_real_report
+
+        ensure_real_report()
         app.rate_limiter.reset()
         with TestClient(app.app) as client:
             for uf, esperado in (("SP", "São Paulo"), ("RJ", "Rio de Janeiro")):

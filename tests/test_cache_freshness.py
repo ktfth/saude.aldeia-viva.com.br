@@ -220,3 +220,66 @@ class TestEnrichedReportIsTheOnlyShape(unittest.TestCase):
             },
             cache_hit=False,
         )
+
+
+class TestLifespanIsIdempotent(unittest.TestCase):
+    """Reentrar no lifespan não pode reparsear o relatório inteiro.
+
+    Cada `TestClient(app.app)` sobe o lifespan, que chamava
+    `load_or_refresh_report` incondicionalmente: 1,64s para ler e converter os
+    17 MB da cache, vinte vezes na suíte. O estado já está em memória — só a
+    primeira entrada precisa carregá-lo.
+
+    Vale além do teste: um processo que reinicie o ciclo de vida da aplicação
+    sem reiniciar o interpretador não deveria pagar de novo por um dado que
+    não mudou. `SINAN_FORCE_REFRESH=1` continua forçando.
+    """
+
+    def test_second_client_does_not_reload(self) -> None:
+        from unittest.mock import patch
+
+        from fastapi.testclient import TestClient
+
+        import app
+
+        with preserved_report_state():
+            with TestClient(app.app):
+                pass  # primeira entrada carrega
+            with patch.object(app, "load_or_refresh_report") as carga:
+                with TestClient(app.app):
+                    pass
+            carga.assert_not_called()
+
+    def test_an_empty_state_still_loads(self) -> None:
+        from unittest.mock import patch
+
+        from fastapi.testclient import TestClient
+
+        import app
+
+        with preserved_report_state():
+            app.db_clini = []
+            with patch.object(app, "load_or_refresh_report") as carga:
+                with TestClient(app.app):
+                    pass
+            carga.assert_called_once()
+
+    def test_force_refresh_still_forces(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        from fastapi.testclient import TestClient
+
+        import app
+
+        with preserved_report_state():
+            with TestClient(app.app):
+                pass
+            os.environ["SINAN_FORCE_REFRESH"] = "1"
+            try:
+                with patch.object(app, "load_or_refresh_report") as carga:
+                    with TestClient(app.app):
+                        pass
+                carga.assert_called_once()
+            finally:
+                os.environ.pop("SINAN_FORCE_REFRESH", None)

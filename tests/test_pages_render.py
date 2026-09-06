@@ -16,6 +16,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 import app
+from tests import ensure_real_report
 
 # Rotas que devolvem HTML para humanos.
 HTML_ROUTES = ("/", "/dashboard", "/sobre", "/planos", "/agentes")
@@ -38,6 +39,7 @@ MACHINE_ROUTES = (
 
 class TestEveryPageRenders(unittest.TestCase):
     def setUp(self) -> None:
+        ensure_real_report()
         app.rate_limiter.reset()
         self.client = TestClient(app.app)
         self.client.__enter__()

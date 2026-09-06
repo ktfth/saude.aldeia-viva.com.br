@@ -1135,9 +1135,21 @@ def render_plans_page(request: Request) -> str:
 
 
 def render_explanation_page(request: Request) -> str:
+    """Página de metodologia.
+
+    É para onde o painel manda quem quer saber como o número foi feito, e por
+    isso é a página onde uma afirmação errada custa mais caro — ela é citada.
+
+    A versão anterior descrevia o método que existia antes das correções:
+    dizia que o nível crítico vinha de "óbitos ou score muito elevado"
+    (limiar removido por saturar 24,3% dos municípios) e mandava priorizar
+    pelo score, que correlaciona 0,822 com a população. Não mencionava o
+    denominador populacional nem a dimensão temporal.
+    """
     source_rows = "".join(
         f"<li><strong>{escape_html(clean_value(item.get('nome')))}</strong>: "
-        f"{format_number(item.get('registros', 0))} registros, ano {escape_html(clean_value(item.get('ano')))}.</li>"
+        f"{format_number(item.get('registros', 0))} registros, "
+        f"arquivo de <strong>{escape_html(clean_value(item.get('ano')))}</strong>.</li>"
         for item in db_metadata.get("fontes", [])
     )
     formula_rows = "".join(
@@ -1145,35 +1157,52 @@ def render_explanation_page(request: Request) -> str:
         f"<code>{escape_html(risk_profile_for_source(source).formula)}</code></li>"
         for source in DISEASE_SOURCES.values()
     )
+    recencia = db_metadata.get("recencia") or {}
+    populacao = db_metadata.get("populacao") or {}
+    minimo = populacao.get("populacao_minima_confiavel") or 10_000
+    atuais = recencia.get("agravos_com_fonte_do_ano_corrente")
+    total_agravos = recencia.get("agravos_total")
+
     body = f"""
 <main class="page" id="conteudo-principal">
-  <section class="hero">
-    <div class="prose">
-      <p class="eyebrow">Dados e metodologia</p>
-      <h1>Como o índice transforma notificações em decisão.</h1>
-      <p class="lead">A API consolida dados do SINAN/OpenDataSUS por município, doença e vírus, preservando a granularidade municipal disponível nos CSVs públicos.</p>
-    </div>
-  </section>
-  <section class="facts" aria-label="Pontos metodológicos">
-    <article class="fact"><h3>Fonte</h3><p>SINAN/OpenDataSUS e arquivos DBC do DATASUS para notificações; IBGE para nomes e UFs dos municípios.</p></article>
-    <article class="fact"><h3>Granularidade municipal</h3><p>Distritos e bairros, como Perus, são resolvidos para o município oficial quando houver alias conhecido.</p></article>
-    <article class="fact"><h3>Limite de uso</h3><p>Dados não substituem vigilância epidemiológica oficial, investigação local ou validação clínica.</p></article>
-  </section>
+  <header class="dash-head">
+    <h1>Como o índice transforma notificações em decisão</h1>
+    <p class="lead">Consolidação do SINAN/OpenDataSUS por município e agravo, com o denominador populacional do IBGE e a idade de cada fonte declarada.</p>
+  </header>
+
+  {render_data_status(db_metadata)}
+
   <div class="text-layout">
     <section class="panel section-panel prose">
-      <h2>Fórmula do score</h2>
-      <p>O score prioriza volume, gravidade, sinais de alarme, hospitalizações e óbitos. Na fase atual, cada doença ou agravo possui um perfil de risco próprio.</p>
-      <pre class="code-block">{escape_html(RISK_FORMULA)}</pre>
+      <h2>O que comparar entre municípios</h2>
+      <p>A incidência <strong>por 100 mil habitantes</strong> (<code>incidencia.por_100k</code>) é a única medida comparável entre municípios de portes diferentes. <code>risk_score</code> é soma ponderada de contagens absolutas e, medido nesta base, tem <strong>correlação de 0,82 com a população</strong>: ordenar por ele responde "onde há mais casos", não "onde é pior".</p>
+      <p>A taxa nunca é publicada sozinha. Abaixo de {format_number(minimo)} habitantes um único caso move a incidência o bastante para desestabilizá-la, então esses municípios vêm com a taxa marcada e ficam abaixo dos confiáveis na ordenação — publicados, nunca suprimidos em silêncio. População estimada pelo IBGE (SIDRA 6579).</p>
+
+      <h2>Como o nível de risco é calculado</h2>
+      <p>Cada agravo tem o seu próprio perfil de risco e o seu próprio nível. O nível do município é o <strong>pior nível entre os agravos</strong> dele — não há fórmula aplicada sobre a soma, porque somar dez agravos e cinco anos-fonte num só número deixava 24,3% dos municípios em "crítico" e a variável parava de discriminar.</p>
+      <p><code>nivel_risco</code> considera todos os anos-fonte: é gravidade histórica. <code>nivel_risco_fonte_atual</code> olha só os agravos cujo arquivo é do ano corrente, e é ele que responde "exige ação agora?". Quando o histórico é mais grave, o painel diz.</p>
       <ul>{formula_rows}</ul>
-      <h2>Fontes carregadas</h2>
+
+      <h2>Três relógios, que não podem ser confundidos</h2>
+      <ul>
+        <li><strong>Carga</strong> — há quanto tempo o serviço buscou dados. É falha operacional do serviço, não fato sobre os municípios.</li>
+        <li><strong>Fonte</strong> — de que ano é o arquivo daquele agravo. O relatório reúne <strong>anos diferentes</strong> por agravo: hoje, {atuais if atuais is not None else "alguns"} de {total_agravos if total_agravos is not None else "dez"} têm arquivo do ano corrente.</li>
+        <li><strong>Recência</strong> — até quando o município notificou, medido <em>dentro</em> da fonte daquele agravo. É o único dos três que é fato epidemiológico sobre o município.</li>
+      </ul>
+      <p>Um agravo com sinal recente cuja fonte é de 2022 continua sendo dado de 2022. Confira <code>fonte.ano</code> antes de datar qualquer afirmação.</p>
+
+      <h2>Fontes carregadas nesta instância</h2>
       <ul>{source_rows or "<li>Nenhuma fonte carregada nesta instância.</li>"}</ul>
-      <h2>Interpretação</h2>
-      <p>O nível <strong>crítico</strong> aparece quando há óbitos ou score muito elevado. O nível <strong>alto</strong> aparece quando há gravidade ou concentração relevante de casos. A saída lista doenças e vírus para facilitar leitura por gestores, sistemas e agentes.</p>
+
+      <h2>Granularidade</h2>
+      <p>A granularidade processada é sempre municipal. Nomes de bairro e distrito de São Paulo, Rio de Janeiro, Belo Horizonte e Recife são resolvidos para o município oficial, e a resposta traz <code>filtro_localidade</code> com a origem da consulta. Alguns nomes existem em <strong>mais de uma cidade</strong> suportada: informe a UF para escolher, ou leia o bloco de ambiguidade que a resposta devolve.</p>
+      <p>Não infira contagem por bairro a partir de dado municipal.</p>
     </section>
-    <aside class="text-aside" aria-label="Resumo metodológico">
-      <article class="note-card"><strong>Uso recomendado</strong><p>Priorize a investigação local dos municípios com risco alto ou crítico e valide sinais graves nas fontes oficiais.</p></article>
-      <article class="note-card"><strong>Leitura do score</strong><p>O score organiza prioridade operacional; ele não substitui vigilância epidemiológica, diagnóstico ou boletins oficiais.</p></article>
-      <article class="note-card"><strong>Granularidade</strong><p>Quando o dado de bairro não existe na fonte, a API informa o município oficial associado à consulta.</p></article>
+
+    <aside class="text-aside" aria-label="Limites de uso">
+      <article class="note-card"><strong>O que estes dados não são</strong><p>Não substituem vigilância epidemiológica oficial, investigação local, diagnóstico nem boletins oficiais.</p></article>
+      <article class="note-card"><strong>Subnotificação</strong><p>O SINAN registra o que foi notificado. Incidência baixa pode significar poucos casos ou pouca notificação — o número não distingue os dois.</p></article>
+      <article class="note-card"><strong>Contrato completo</strong><p>Campos, limites e regras de interpretação legíveis por máquina em <a href="/agent.json">agent.json</a> e <a href="/llms.txt">llms.txt</a>.</p></article>
     </aside>
   </div>
 </main>"""
@@ -1182,8 +1211,8 @@ def render_explanation_page(request: Request) -> str:
         path="/sobre",
         title=f"Dados, fontes e metodologia | {SITE_NAME}",
         description=(
-            "Entenda as fontes SINAN/OpenDataSUS, a fórmula de risco, a granularidade "
-            "municipal e as limitações da API epidemiológica."
+            "Fontes SINAN/OpenDataSUS, incidência por 100 mil habitantes, cálculo do "
+            "nível de risco, idade das fontes e limitações da API epidemiológica."
         ),
         body=body,
         json_ld=base_json_ld(request)
@@ -1869,10 +1898,17 @@ async def get_api_user(x_api_key: str | None = Header(None)):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    force = os.getenv("SINAN_FORCE_REFRESH") == "1"
+    # Reentrar no ciclo de vida no mesmo processo nao pode reparsear os 17 MB
+    # da cache: o estado ja esta em memoria. Custava 1,64s por entrada, e a
+    # suite sobe o app vinte vezes.
+    if not force and report_state_ready():
+        logger.info("Estado do relatório já carregado; ingestão dispensada.")
+        yield
+        return
+
     logger.info("Iniciando ingestão de dados reais do SINAN/OpenDataSUS...")
-    load_or_refresh_report(
-        DEFAULT_YEAR, force_refresh=os.getenv("SINAN_FORCE_REFRESH") == "1"
-    )
+    load_or_refresh_report(DEFAULT_YEAR, force_refresh=force)
     yield
 
 

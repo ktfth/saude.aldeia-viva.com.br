@@ -25,6 +25,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 import app
+from tests import ensure_real_report
 from domain.tiers import TIERS, tier_by_code, tier_max_results
 
 
@@ -72,6 +73,7 @@ class TestTierDeclaration(unittest.TestCase):
 
 class TestPlansPageReadsFromCode(unittest.TestCase):
     def setUp(self) -> None:
+        ensure_real_report()
         app.rate_limiter.reset()
         self.client = TestClient(app.app)
         self.client.__enter__()
@@ -125,6 +127,7 @@ class TestPagination(unittest.TestCase):
     """Sem paginação, "acesso completo" era impossível de cumprir."""
 
     def setUp(self) -> None:
+        ensure_real_report()
         app.rate_limiter.reset()
         self.client = TestClient(app.app)
         self.client.__enter__()

@@ -56,3 +56,35 @@ class ApiTestCase:
 
         app.rate_limiter.reset()
         super().setUp()
+
+
+_REAL_STATE = None
+
+
+def ensure_real_report():
+    """Garante que os globais contenham o relatório real da instância.
+
+    O `lifespan` recarregava o relatório a cada `TestClient`, o que custava
+    1,64s por vez — 117s de suíte — mas também servia de isolamento
+    acidental entre testes. Tornar o lifespan idempotente derrubou a suíte
+    para 10s e expôs a dependência.
+
+    Aqui o relatório é lido UMA vez por processo e depois apenas reatribuído,
+    o que é uma cópia de referência e não uma reinterpretação de 17 MB.
+    """
+    global _REAL_STATE
+
+    import app
+
+    if _REAL_STATE is None:
+        if not app.report_state_ready():
+            app.load_or_refresh_report(app.DEFAULT_YEAR)
+        _REAL_STATE = (
+            list(app.db_clini),
+            list(app.db_alertas),
+            dict(app.db_metadata),
+        )
+
+    app.db_clini = list(_REAL_STATE[0])
+    app.db_alertas = list(_REAL_STATE[1])
+    app.db_metadata = dict(_REAL_STATE[2])
