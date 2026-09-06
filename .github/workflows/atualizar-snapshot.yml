@@ -1,0 +1,106 @@
+# Mantem o snapshot embarcado atual sem depender de alguem estar presente.
+#
+# Sem isto o dado apodrece calado: producao ficou 133 dias parada em
+# 2026-04-26 e servia 60% menos casos que a realidade -- faltavam 195 mil
+# notificacoes de dengue e 229 obitos. Nada falhava, porque envelhecer nao
+# levanta erro.
+#
+# Por que fora do servico: a recarga com download real leva ~250s e o
+# maxDuration da funcao na Vercel e 60s. Cron chamando /v1/refresh nao tem
+# como completar, e o container serverless e efemero -- o resultado seria
+# descartado de qualquer forma. Medido, nao suposto.
+
+name: Atualizar snapshot
+
+on:
+  schedule:
+    # Segunda, 06:00 UTC (03:00 em Brasilia). Os arquivos de arbovirose sao
+    # continuos e crescem durante o ano; os DBC mudam uma vez por ano.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # No nivel do job para ficar disponivel no `if` dos passos: env
+    # declarado no proprio passo ainda nao existe quando a condicao dele
+    # e avaliada.
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias
+        run: pip install --no-cache-dir -r requirements.txt
+
+      # Os tetos de ano sao numeros cravados no codigo sobre um fato do mundo
+      # exterior. Nao derruba o job: e um aviso, e a recarga funciona sem ele.
+      - name: Conferir tetos de ano das fontes
+        continue-on-error: true
+        run: python scripts/auditar_fontes.py
+
+      # O gerador aborta sozinho se a carga nova perder cobertura -- este
+      # projeto ja teve uma recarga parcial trocar 5.339 municipios e 10
+      # agravos por 4.462 e 4.
+      - name: Regenerar o snapshot das fontes reais
+        run: python scripts/gerar_snapshot.py | tee /tmp/geracao.txt
+
+      # A suite roda CONTRA o snapshot novo, antes de publicar. Dado novo ja
+      # quebrou teste neste projeto por acoplamento a conteudo; melhor
+      # descobrir aqui do que em producao.
+      - name: Rodar a suite contra o snapshot novo
+        run: python -m unittest discover -s tests
+
+      - name: Resumo da execucao
+        if: always()
+        run: |
+          echo '## Atualizacao do snapshot' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/geracao.txt >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Publicar se o snapshot mudou
+        id: publicar
+        run: |
+          if git diff --quiet -- bundled_report_snapshot.py; then
+            echo 'Snapshot inalterado; nada a publicar.'
+            echo 'mudou=nao' >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bundled_report_snapshot.py
+          git commit -m "chore: snapshot das fontes em $(date -u +%Y-%m-%d)"
+          git push
+          echo 'mudou=sim' >> $GITHUB_OUTPUT
+
+      # O projeto na Vercel NAO esta ligado ao repositorio: `vercel project
+      # inspect` nao traz secao de git, e todo deploy ate aqui saiu de uma
+      # maquina local. Entao um push sozinho nao publica nada.
+      #
+      # Duas formas de fechar o ciclo, e ambas dependem de quem opera:
+      #   1. Ligar o projeto ao repo no painel da Vercel -- push passa a
+      #      publicar, e este passo vira desnecessario.
+      #   2. Criar o segredo VERCEL_TOKEN no repositorio -- este passo assume.
+      # Sem nenhuma das duas o snapshot novo fica commitado e nao vai ao ar.
+      - name: Publicar na Vercel
+        if: steps.publicar.outputs.mudou == 'sim' && env.VERCEL_TOKEN != ''
+        run: npx --yes vercel@latest --prod --yes --token "$VERCEL_TOKEN"
+
+      - name: Avisar quando o deploy nao pode acontecer
+        if: steps.publicar.outputs.mudou == 'sim' && env.VERCEL_TOKEN == ''
+        run: |
+          echo '::warning::Snapshot novo commitado, mas NAO publicado.' \
+               'Ligue o projeto ao repositorio no painel da Vercel ou crie' \
+               'o segredo VERCEL_TOKEN.'
+
