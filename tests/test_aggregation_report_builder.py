@@ -8,16 +8,14 @@ This is critical for the future cockpit (drill-down, comparisons, etc.).
 """
 
 import unittest
-from typing import Any
 
-from app import (
-    DISEASE_SOURCES,
-    build_epidemiology_report,
+from aggregation.report_builder import (
     create_disease_summary,
     create_municipality_summary,
 )
+from app import build_epidemiology_report
+from domain.disease_sources import DISEASE_SOURCES
 
-from aggregation import report_builder  # Fase 0 extraction in progress
 
 
 class TestCreateSummaries(unittest.TestCase):

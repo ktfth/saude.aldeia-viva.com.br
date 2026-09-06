@@ -11,12 +11,11 @@ import os
 import unittest
 from unittest.mock import patch
 
-import app
-from app import (
+from app import enabled_disease_sources
+from domain.disease_sources import (
     DEFAULT_DISEASE_CODES,
     DISEASE_SOURCES,
     classification_label,
-    enabled_disease_sources,
 )
 
 

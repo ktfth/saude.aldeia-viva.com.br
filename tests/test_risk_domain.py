@@ -8,10 +8,10 @@ This file follows the TDD approach defined in the approved PLAN-BIRO-COMPLETO.md
 """
 
 import unittest
-from dataclasses import asdict
 
-import app
-from app import RISK_PROFILES, RiskProfile, risk_level, finalize_disease_summary
+# Importa de quem é dono, e não do `app` como passagem: a suíte dependia
+# de o app reexportar um símbolo que ele próprio não usa.
+from domain.risk import RISK_PROFILES, finalize_disease_summary, risk_level
 
 
 class TestRiskProfiles(unittest.TestCase):

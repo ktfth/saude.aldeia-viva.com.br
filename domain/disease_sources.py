@@ -8,9 +8,7 @@ This module is pure data + small pure functions.
 """
 
 from dataclasses import dataclass
-from typing import Any
 
-from .risk import RiskProfile  # only for type hints in methods if needed
 
 
 @dataclass(frozen=True)

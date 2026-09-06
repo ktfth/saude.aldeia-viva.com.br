@@ -21,6 +21,19 @@ from typing import Any, Iterable, Mapping
 
 from aggregation.utils import clean_code, clean_value
 
+# Consolidado aqui: a extração da "Fase 0" deixou um SEGUNDO bloco de
+# import no meio do arquivo, repetindo urllib, `date` e os tipos. Não
+# quebrava nada — import repetido é idempotente — mas quem lesse o módulo
+# não conseguia saber do que ele depende.
+from pathlib import Path
+import csv
+import hashlib
+import io
+import os
+import tempfile
+import urllib.parse
+import zipfile
+
 # Note: Some constants are accessed lazily inside functions.
 # The load_*_records functions are defined later in this same file.
 
@@ -124,19 +137,6 @@ def load_latest_available_records(
 # Low-level download + parsing functions (moved from app.py during Fase 0)
 # =============================================================================
 
-import csv
-import hashlib
-import io
-import os
-import tempfile
-import urllib.error
-import urllib.parse
-import urllib.request
-import zipfile
-
-from datetime import date
-from pathlib import Path
-from typing import Any, Iterable, Mapping
 
 
 # Constants are accessed lazily inside functions to avoid circular import
@@ -144,7 +144,6 @@ from typing import Any, Iterable, Mapping
 
 
 def download_bytes(url: str) -> bytes:
-    from app import REQUEST_TIMEOUT_SECONDS, SINAN_CACHE_DIR
 
     if os.getenv("SINAN_DISABLE_CACHE") == "1":
         return fetch_url_bytes(url)

@@ -1,24 +1,15 @@
 from collections import Counter
-import csv
 import gzip
 import hashlib
 import hmac
 import html
-import io
 import threading
 import json
 import logging
 import os
 import re
-import tempfile
-import unicodedata
-import urllib.error
-import urllib.parse
-import urllib.request
-import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
@@ -28,33 +19,20 @@ from domain.disease_sources import (
     DEFAULT_DISEASE_CODES,
     DISEASE_SOURCES,
     DiseaseSource,
-    classification_label,
 )
 from domain.risk import (
     RISK_FORMULA,
     RISK_LEVEL_ORDER,
-    RISK_PROFILES,
-    RiskProfile,
-    finalize_disease_summary,
-    risk_level,
     risk_profile_for_source,
 )
 
 # Aggregation layer (Fase 0 - continuing extraction)
 from aggregation.report_builder import (
     build_epidemiology_report,
-    build_high_alerts,
-    create_disease_summary,
-    create_municipality_summary,
 )
 from aggregation.filters import (
     filter_risk_index,
     filter_alerts,
-    resolve_locality_alias,
-    municipality_matches,
-    with_locality_alias,
-    level_at_least,
-    LOCALITY_ALIASES,
     CITY_NEIGHBORHOODS,
     ambiguous_locality_names,
     get_supported_bairros,
@@ -93,12 +71,10 @@ from presentation.signal import (
     render_incidence_cell,
     render_risk_cell,
     render_signal_strip,
-    render_signal_tag,
     render_strip_legend,
     sort_diseases_for_strip,
 )
-from aggregation.report_builder import finalize_municipality_rows, is_death_record, is_hospitalized_record
-from aggregation.utils import any_flag, clean_code, clean_value, first_present, has_any_positive_field, is_truthy_code, parse_date_value, update_latest_date
+from aggregation.utils import clean_code, clean_value
 
 # The loader module exists. We avoid top-level import here to prevent
 # circular dependencies during the gradual monolith breakup.
@@ -1113,10 +1089,10 @@ def render_dashboard_page(request: Request) -> str:
     Entrou no lugar um único fato, que era o mais importante e o único
     invisível: a idade do dado.
     """
-    year = signal_reference_date().year
-    period_year = clean_value(db_metadata.get("periodo", {}).get("ano")) or str(
-        DEFAULT_YEAR
-    )
+    # `year` e `period_year` eram calculados aqui e não usados por ninguém:
+    # alimentavam o gráfico Chart.js e o payload JSON embutido que a docstring
+    # acima diz terem sido removidos. Sobrava uma chamada a
+    # `signal_reference_date()` desperdiçada a cada render de página.
     body = f"""
 <main class="page" id="conteudo-principal">
   <div id="risk-dashboard">

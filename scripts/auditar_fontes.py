@@ -66,7 +66,7 @@ def auditar() -> int:
             desatualizados.append((fonte.codigo, fonte.latest_year, disponivel))
             situacao = f"DESATUALIZADO: existe {disponivel}"
         elif fonte.latest_year > disponivel:
-            situacao = f"teto acima do publicado (o carregador desce sozinho)"
+            situacao = "teto acima do publicado (o carregador desce sozinho)"
         else:
             situacao = "confere"
         print(f"{fonte.codigo:<8} {str(fonte.latest_year):<7} {disponivel:<11} {situacao}")

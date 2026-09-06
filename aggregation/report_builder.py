@@ -10,7 +10,6 @@ the future cockpit (drill-down, year comparisons, maps, etc.).
 All functions here should remain as pure as possible.
 """
 
-from datetime import datetime
 from typing import Any, Iterable, Mapping
 
 from domain.disease_sources import DISEASE_SOURCES, classification_label
@@ -27,7 +26,6 @@ from .utils import (
     clean_value,
     first_present,
     has_any_positive_field,
-    is_truthy_code,
     normalize_text,
     parse_date_value,
     update_latest_date,

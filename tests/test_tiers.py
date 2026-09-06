@@ -49,7 +49,6 @@ class TestTierDeclaration(unittest.TestCase):
 
     def test_free_matches_the_key_shipped_in_users_json(self) -> None:
         import json
-        from pathlib import Path
 
         keys = json.loads(app.api_key_manager.path.read_text(encoding="utf-8"))["keys"]
         free_key = next(v for v in keys.values() if v["tier"] == "free")
@@ -57,7 +56,6 @@ class TestTierDeclaration(unittest.TestCase):
 
     def test_premium_matches_the_key_shipped_in_users_json(self) -> None:
         import json
-        from pathlib import Path
 
         keys = json.loads(app.api_key_manager.path.read_text(encoding="utf-8"))["keys"]
         premium_key = next(v for v in keys.values() if v["tier"] == "premium")

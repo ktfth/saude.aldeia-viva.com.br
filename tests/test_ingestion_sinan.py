@@ -36,12 +36,12 @@ class TestDateParsing(unittest.TestCase):
     """Dates come in multiple inconsistent formats from DATASUS."""
 
     def test_parse_iso_date(self):
-        from app import parse_date_value
+        from aggregation.utils import parse_date_value
 
         self.assertEqual(parse_date_value("2025-03-15"), "2025-03-15")
 
     def test_parse_brazilian_date(self):
-        from app import parse_date_value
+        from aggregation.utils import parse_date_value
 
         self.assertEqual(parse_date_value("15/03/2025"), "2025-03-15")
 
@@ -57,7 +57,7 @@ class TestDateParsing(unittest.TestCase):
         Sem data utilizável, a resposta honesta é nenhuma data: a camada de
         recência já representa isso como "desconhecido".
         """
-        from app import parse_date_value
+        from aggregation.utils import parse_date_value
 
         self.assertEqual(parse_date_value("nonsense"), "")
 

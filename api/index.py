@@ -6,4 +6,3 @@ mesmo commit que escreveu a documentação afirmando que o deploy era na
 Vercel. Restaurado.
 """
 
-from app import app

@@ -9,7 +9,6 @@ import unittest
 
 from aggregation.filters import (
     filter_risk_index,
-    filter_alerts,
     resolve_locality_alias,
     level_at_least,
     LOCALITY_ALIASES,

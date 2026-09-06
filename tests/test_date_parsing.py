@@ -130,7 +130,6 @@ class TestUpdateLatestDate(unittest.TestCase):
         self.assertEqual(summary["d"], "2026-06-01")
 
     def test_the_stored_value_is_always_iso(self) -> None:
-        import re
 
         summary = {}
         for candidato in ("21/04/2026", "2026-06-01 09:00", "20260715"):

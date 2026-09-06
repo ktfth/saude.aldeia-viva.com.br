@@ -14,9 +14,7 @@ geographic drill-down, saved views, etc.).
 
 from typing import Any, Iterable, Mapping
 
-from domain.disease_sources import DISEASE_SOURCES
 from domain.risk import (  # RISK_FORMULA usado em alguns caminhos de metadata
-    RISK_FORMULA,
     RISK_LEVEL_ORDER,
 )
 

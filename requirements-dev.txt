@@ -17,3 +17,8 @@
 
 httpx>=0.27
 httpx2>=0.1
+
+# Linter. As regras `F` do pyflakes pegam a familia inteira de defeito que a
+# varredura manual desta sessao encontrou: import sem uso, variavel calculada
+# e nunca lida, nome redefinido. `tests/test_lint.py` as exige limpas.
+ruff>=0.5
