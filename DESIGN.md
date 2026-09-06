@@ -78,9 +78,39 @@ Sistema mais refinado (adicionado durante o trabalho de "visão completa por mun
 
 ## Padrões de Responsividade
 
-- Breakpoints implícitos via `clamp()` e media queries pontuais
-- Tabelas: scroll horizontal em telas estreitas + `display: grid` com `data-label` para mobile (ver `.table-wrap` + media query)
-- Header: sticky com backdrop blur
+**Escala declarada. Regra nova usa só estes três valores:**
+
+| Breakpoint | O que muda |
+|---|---|
+| `860px` | Colunas laterais viram coluna única (`.hero`, `.text-layout`, `.detail-grid`); a assinatura sai da marca |
+| `720px` | Cabeçalho empilha e deixa de ser fixo; tabela vira cartões por `data-label` |
+| `560px` | Telefone: um campo de filtro por linha, botões de largura cheia |
+
+O resto da fluidez vem de `clamp()` e de `minmax()` com mínimo `0`.
+
+**Por que a escala existe.** Antes dela havia quatro breakpoints avulsos
+(560, 640, 720, 820) espalhados por cinco arquivos, cada um escrito no
+momento em que alguém tratou um componente. Nenhum tratava o esqueleto da
+página, e não havia onde olhar para perceber a falta: as quatro páginas
+mediam **588px de largura numa tela de 390px** — o cabeçalho sozinho
+empurrava 198px para fora, e a aplicação inteira andava de lado em qualquer
+telefone.
+
+**Como medir.** Media query dispara contra a largura do *viewport*.
+Constranger uma `<div>` a 390px não dispara nada — a auditoria que fiz assim
+mediu errado. Dentro de um `<iframe width="390">` elas disparam de verdade, e
+é assim que `tests/test_responsive_layout.py` documenta a medição.
+
+**Redes:**
+- `tests/test_responsive_layout.py` — a escala é exatamente esses três
+  valores, todo grid com coluna de mínimo ≥ 300px tem regra de colapso, e a
+  marca cede em tela estreita
+- `tests/test_css_is_reachable.py` — nenhuma regra estiliza o nada (dois dos
+  restos removidos eram armadilhas de tela estreita esperando alguém
+  renderizar a classe)
+
+**Cabeçalho:** fixo com backdrop blur no desktop; estático no telefone, onde
+custaria um quinto da altura útil e a navegação não caberia numa linha.
 
 ## Como Evoluir o Design
 

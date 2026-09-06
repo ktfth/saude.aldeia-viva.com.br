@@ -107,22 +107,20 @@
   letter-spacing: .05em;
 }
 
-.detail-placeholder {
-  padding: 16px;
-  background: #f8fafc;
-  border-radius: 10px;
-  color: #64748b;
-  font-size: .9rem;
-}
-
 .detail-hint {
   font-size: .75rem;
   color: var(--muted);
 }
 
-/* Responsividade do detail panel */
-@media (max-width: 820px) {
+/* Responsividade do detail panel.
+   860 e 560 são a escala declarada em layout.css; 820 era um valor avulso. */
+@media (max-width: 860px) {
   .detail-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
+}
+
+@media (max-width: 560px) {
+  /* Título longo e botão de fechar disputavam a mesma linha. */
+  .detail-header { flex-wrap: wrap; gap: 10px; }
 }

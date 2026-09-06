@@ -35,7 +35,6 @@ th.num { text-align: right; }
 }
 
 .cell-deaths { color: var(--red); font-weight: 700; }
-.cell-muted { color: var(--muted); }
 
 /* Toda a linha é acionável: clique, Enter ou Espaço. Antes respondia
    apenas ao mouse, sem foco visível e sem papel semântico. */
@@ -71,7 +70,6 @@ tr:last-child td { border-bottom: 0; }
   margin-bottom: 4px;
 }
 
-
 /* ---------------------------------------------------------------------------
    Tabela em tela estreita.
 
@@ -81,12 +79,18 @@ tr:last-child td { border-bottom: 0; }
    das colunas. Aqui a promessa passa a existir de fato.
    --------------------------------------------------------------------------- */
 
+/* Escopo em `.table-wrap`: estes seletores eram de elemento nu (`table`,
+   `tbody tr`, `td`) e alcançavam TODA tabela da página. A `.detail-table`,
+   que tem `min-width: 720px` e foi desenhada para rolar dentro do próprio
+   invólucro, virava uma pilha de células de 720px de largura com vãos
+   enormes — medido no painel de detalhe aberto em 390px. Uma regra escrita
+   para uma tabela não pode valer para a próxima que alguém adicionar. */
 @media (max-width: 720px) {
   .table-wrap { overflow-x: visible; border: 0; }
 
-  table { min-width: 0; }
+  .table-wrap table { min-width: 0; }
 
-  thead {
+  .table-wrap thead {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -94,7 +98,7 @@ tr:last-child td { border-bottom: 0; }
     clip-path: inset(50%);
   }
 
-  tbody tr {
+  .table-wrap tbody tr {
     display: grid;
     grid-template-columns: 1fr auto;
     gap: 6px 12px;
@@ -105,17 +109,20 @@ tr:last-child td { border-bottom: 0; }
     background: #fff;
   }
 
-  tbody td {
+  .table-wrap tbody td {
     padding: 0;
     border: 0;
   }
 
-  /* Município ocupa a linha inteira; risco e casos dividem a seguinte. */
-  td[data-label="Município"] { grid-column: 1 / -1; }
-  td[data-label="Casos"] { text-align: right; }
-  td[data-label="Agravos"] { grid-column: 1 / -1; }
+  /* Município ocupa a linha inteira; risco e incidência dividem a seguinte.
+     A regra anterior mirava `data-label="Casos"`, coluna que deixou de
+     existir quando a tabela passou a mostrar incidência: o seletor ficou
+     apontando para o nada e ninguém percebeu. */
+  .table-wrap td[data-label="Município"] { grid-column: 1 / -1; }
+  .table-wrap td[data-label="Incidência"] { text-align: right; }
+  .table-wrap td[data-label="Agravos"] { grid-column: 1 / -1; }
 
-  td.num { text-align: right; }
+  .table-wrap td.num { text-align: right; }
 
-  .empty-cell { grid-column: 1 / -1; text-align: left; }
+  .table-wrap .empty-cell { grid-column: 1 / -1; text-align: left; }
 }

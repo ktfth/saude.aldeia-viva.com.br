@@ -72,18 +72,6 @@ nav a.active { background: var(--green); color: #fff; box-shadow: 0 8px 20px rgb
   padding: 36px 0 48px;
 }
 
-.summary-callout {
-  max-width: 720px;
-  margin: 20px 0 0;
-  padding: 16px 18px;
-  border: 1px solid rgba(20, 108, 67, .16);
-  border-left: 5px solid var(--green);
-  border-radius: 0 14px 14px 0;
-  background: linear-gradient(90deg, #e8f5ee, rgba(255, 255, 255, .78));
-  color: #123d28;
-  font-weight: 800;
-}
-
 .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 22px; }
 
 /* Toolbar / Filtros */
@@ -119,14 +107,6 @@ nav a.active { background: var(--green); color: #fff; box-shadow: 0 8px 20px rgb
   flex-wrap: wrap;
 }
 
-@media (max-width: 560px) {
-  /* Numa coluna só, o campo principal não pode continuar pedindo duas. */
-  .toolbar { grid-template-columns: 1fr; }
-  .toolbar > label:first-of-type { grid-column: auto; }
-  .toolbar-actions { justify-content: stretch; }
-  .toolbar-actions .button { flex: 1; }
-}
-
 label {
   display: grid;
   gap: 6px;
@@ -155,42 +135,6 @@ input:focus, select:focus, .button:focus {
 
 :focus-visible { outline: 3px solid rgba(6, 122, 118, .28); outline-offset: 3px; }
 
-.switch {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-height: 42px;
-  padding-top: 22px;
-  color: var(--ink);
-}
-
-.switch input { width: 18px; min-height: 18px; }
-
-/* Quick filters */
-.quick-filters {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin: 0 0 18px;
-}
-
-.quick-filters span {
-  color: var(--muted);
-  font-size: .82rem;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-}
-
-/* Content grids */
-.content-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(360px, .65fr);
-  gap: 24px;
-  align-items: start;
-}
-
 /* Footer */
 .site-footer {
   margin-top: 60px;
@@ -214,7 +158,6 @@ input:focus, select:focus, .button:focus {
   color: var(--green);
 }
 
-
 .section-panel { padding: clamp(22px, 2.8vw, 30px); }
 
 .section-panel h2 { font-size: clamp(1.75rem, 2.4vw, 2.45rem); }
@@ -228,77 +171,6 @@ input:focus, select:focus, .button:focus {
 }
 
 .section-head p { margin: 6px 0 0; color: var(--muted); }
-
-/* Radar / Métricas */
-.radar-panel { padding: clamp(22px, 3vw, 30px); }
-
-.radar-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.radar-head .eyebrow { margin-bottom: 8px; }
-
-.data-freshness {
-  padding: 6px 9px;
-  border-radius: 999px;
-  background: var(--soft);
-  color: var(--muted);
-  font-size: .78rem;
-  font-weight: 800;
-  white-space: nowrap;
-}
-
-.radar-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  margin-top: 16px;
-}
-
-.metric {
-  min-height: 118px;
-  padding: 18px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: linear-gradient(180deg, #ffffff, var(--soft));
-}
-
-.metric span {
-  color: var(--muted);
-  font-size: .78rem;
-  font-weight: 800;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-
-.metric strong {
-  display: block;
-  margin-top: 10px;
-  font-size: clamp(1.65rem, 4vw, 2.45rem);
-  line-height: 1;
-  letter-spacing: -.04em;
-}
-
-/* Facts / Cards de explicação */
-.facts {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 20px;
-  margin: 34px 0;
-}
-
-.fact {
-  min-height: 148px;
-  padding: 24px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: #fff;
-}
-
-.fact p { margin: 10px 0 0; color: var(--muted); }
 
 /* Text layout (agentes page) */
 .text-layout {
@@ -319,7 +191,6 @@ input:focus, select:focus, .button:focus {
 
 .note-card strong { display: block; margin-bottom: 6px; }
 .note-card p { margin: 0; color: var(--muted); }
-
 
 /* ---------------------------------------------------------------------------
    Cabecalho do painel operacional.
@@ -349,3 +220,79 @@ input:focus, select:focus, .button:focus {
 }
 
 .stat-value.is-critical { color: var(--red); }
+
+/* ---------------------------------------------------------------------------
+   Telas estreitas.
+
+   Medido com cada página dentro de um iframe de 390px — o único jeito de
+   fazer as media queries dispararem de verdade neste ambiente. O resultado
+   antes destas regras: as QUATRO páginas mediam 588px de largura num
+   aparelho de 390px. Não era um detalhe de uma tela — o cabeçalho sozinho
+   empurrava 198px para fora, e a aplicação inteira andava de lado.
+
+   A causa: `.brand` combinava `flex-shrink: 0` com uma assinatura de até
+   360px, então nunca cedia; o `nav` era empurrado para fora junto. `.hero` e
+   `.text-layout` não apareciam na medição porque se resolviam contra os
+   588px errados.
+
+   Escala declarada. Regra nova usa SÓ estes três valores — quatro
+   breakpoints ad hoc espalhados por cinco arquivos foi o que permitiu que
+   isto passasse despercebido:
+
+     860px  colunas laterais viram coluna única
+     720px  cabeçalho empilha, tabela vira cartões
+     560px  telefone: um campo por linha, botões de largura cheia
+   --------------------------------------------------------------------------- */
+
+@media (max-width: 860px) {
+  /* A assinatura sob a marca é o que trava o cabeçalho. Ela é decorativa;
+     a identidade está no símbolo e no nome, que ficam. */
+  .brand small { display: none; }
+  .brand { min-width: 0; flex-shrink: 1; }
+
+  /* Segundas colunas com mínimo de 360px e 320px: numa tela de 390px elas
+     sozinhas já não cabem, e não havia nada que as colapsasse. */
+  .hero,
+  .text-layout { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 720px) {
+  /* Cabeçalho fixo custa um quinto da altura útil de um telefone, e a
+     navegação não cabe em uma linha ao lado da marca. Empilha e rola junto
+     com a página — os itens continuam todos visíveis, sem rolagem lateral
+     escondendo metade deles. */
+  .site-header {
+    position: static;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+    min-height: 0;
+    padding: 12px 18px;
+  }
+
+  nav { justify-content: flex-start; gap: 6px; }
+  nav a { padding: 8px 11px; font-size: .88rem; }
+
+  .section-head { flex-direction: column; gap: 10px; }
+
+  /* O h1 global mínimo é 2,1rem — pensado para a dobra de um desktop. Num
+     aparelho de 320px o título do /agentes ocupava quatro linhas e um terço
+     da primeira tela antes de qualquer conteúdo. O teto de 2,1rem faz a
+     transição no breakpoint ser contínua, e não um salto. */
+  h1 { font-size: clamp(1.6rem, 4.6vw, 2.1rem); }
+
+  .page { padding: 26px 18px 56px; }
+
+  .site-footer { gap: 14px; padding: 22px 18px; }
+}
+
+@media (max-width: 560px) {
+  /* Numa coluna só, o campo principal não pode continuar pedindo duas. */
+  .toolbar { grid-template-columns: minmax(0, 1fr); }
+  .toolbar > label:first-of-type { grid-column: auto; }
+  .toolbar-actions { justify-content: stretch; }
+  .toolbar-actions .button { flex: 1; }
+
+  /* Alvo de toque de largura cheia em vez de dois botões apertados. */
+  .actions { gap: 10px; }
+  .actions .button { flex: 1 1 100%; }
+}
