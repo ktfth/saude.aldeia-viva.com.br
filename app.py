@@ -62,6 +62,7 @@ from aggregation.utils import normalize_text
 from ingestion.municipality_lookup import load_municipality_lookup
 from aggregation.recency_enrichment import enrich_report
 from aggregation.population_enrichment import enrich_with_population
+from aggregation.case_composition import with_case_composition
 from aggregation.signal_coverage import (
     describe_coverage as describe_signal_gap,
     with_signal_coverage,
@@ -534,6 +535,10 @@ def apply_report_state(
     # Sem isto, um zero que significa "a fonte nao traz" fica indistinguivel
     # de um zero que significa "nao houve".
     enriched = with_signal_coverage(enriched)
+    # Declara quanto de `casos_provaveis` ainda e notificacao nao investigada.
+    # E o numerador da incidencia: fracoes pendentes muito diferentes produzem
+    # incidencias que nao estao na mesma escala.
+    enriched = with_case_composition(enriched)
 
     db_clini = list(enriched.get("municipios") or [])
     db_alertas = list(enriched.get("alertas_altos") or [])
@@ -1142,6 +1147,28 @@ def render_plans_page(request: Request) -> str:
     )
 
 
+def render_pending_summary() -> str:
+    """Frase com a fração pendente por agravo, do maior para o menor."""
+    composicao = db_metadata.get("composicao_dos_casos") or {}
+    por_agravo = composicao.get("por_agravo") or {}
+    if not por_agravo:
+        return "sem dados de classificação nesta carga."
+
+    itens = sorted(
+        por_agravo.items(), key=lambda kv: -kv[1].get("proporcao_pendente", 0)
+    )
+    partes = []
+    for codigo, dados in itens[:4]:
+        fonte = DISEASE_SOURCES.get(codigo)
+        nome = fonte.nome if fonte else codigo
+        partes.append(
+            f"<strong>{escape_html(nome)}</strong> "
+            f"{dados.get('proporcao_pendente', 0) * 100:.0f}%"
+        )
+    geral = composicao.get("proporcao_pendente_geral", 0) * 100
+    return ", ".join(partes) + f" — no conjunto, {geral:.0f}% dos casos prováveis."
+
+
 def render_signal_gaps() -> str:
     """Lista, por agravo, os termos da fórmula que a fonte não alimenta."""
     cobertura = db_metadata.get("cobertura_de_sinais") or {}
@@ -1214,6 +1241,11 @@ def render_explanation_page(request: Request) -> str:
       <p>A fonte de cada agravo traz campos diferentes. O arquivo da Zika tem 38 colunas e nenhuma de sinal de alarme ou gravidade; o da Dengue tem 121, com 24 delas. Quando a fonte não traz o campo, o termo correspondente da fórmula fica <strong>sempre zero</strong> — e o score da Zika acaba sendo, na prática, apenas a contagem de casos.</p>
       <p>{render_signal_gaps()}</p>
       <p><code>doencas[].sinais_sem_dados</code> declara isso em cada agravo. <strong>Scores de agravos com lacunas diferentes não são comparáveis entre si</strong>, ainda que a fórmula impressa ao lado seja a mesma. E um zero nesses campos pode significar "não houve" ou "a fonte não traz": consulte a lista antes de afirmar ausência.</p>
+
+      <h2>Quanto de "caso provável" ainda está em aberto</h2>
+      <p><code>casos_provaveis</code> é notificações menos descartados — a definição padrão do SINAN. Mas parte desses casos ainda não foi investigada, e a fração varia muito: {render_pending_summary()}</p>
+      <p>Isso é normal em dado recente, porque o encerramento é assíncrono. O que importa é a consequência: <code>casos_provaveis</code> é o <strong>numerador da incidência</strong>, então agravos com frações pendentes muito diferentes produzem incidências que não estão na mesma escala. <code>doencas[].composicao</code> declara isso em cada agravo.</p>
+      <p>E <code>casos_descartados</code> igual a zero, hoje o caso de oito dos dez agravos, costuma significar "nada encerrado ainda" — não "nada descartado".</p>
 
       <h2>Três relógios, que não podem ser confundidos</h2>
       <ul>
@@ -1589,6 +1621,7 @@ def agent_freshness() -> dict[str, Any]:
         "sources": recency.get("fontes"),
         "freshness_definition": recency.get("definicao"),
         "signal_coverage": db_metadata.get("cobertura_de_sinais"),
+        "case_composition": db_metadata.get("composicao_dos_casos"),
         "cache": db_metadata.get("cache"),
     }
 
@@ -1657,6 +1690,12 @@ def agent_manifest(request: Request) -> dict[str, Any]:
             "Um zero em `sinais_alarme`, `casos_graves`, `hospitalizacoes` ou `obitos` pode "
             "significar 'não houve' ou 'a fonte não traz'. Consulte `sinais_sem_dados` antes de "
             "afirmar ausência.",
+            "`doencas[].composicao.proporcao_pendente` diz quanto de `casos_provaveis` ainda não "
+            "tem classificação final. É normal em dado recente, mas varia de 0% a 100% entre "
+            "agravos — e como `casos_provaveis` é o numerador da incidência, agravos com frações "
+            "pendentes muito diferentes produzem incidências fora da mesma escala.",
+            "`casos_descartados` igual a zero costuma significar 'nada encerrado ainda', não "
+            "'nada descartado'. Hoje é zero em oito dos dez agravos.",
         ],
         "recommended_use": [
             "Use /v1/high-alerts para priorizar municípios com doenças em nível alto ou crítico.",

@@ -100,6 +100,11 @@ curl "http://127.0.0.1:8000/v1/risk-index?ordenar=taxa&limite=10&pagina=2"
   alguma lacuna. Scores de agravos com lacunas diferentes **não são
   comparáveis**, e um zero nesses campos pode significar "não houve" ou "a
   fonte não traz".
+- `doencas[].composicao` — quanto de `casos_provaveis` ainda não tem
+  classificação final. Varia de 0% a 100% entre agravos, e `casos_provaveis` é
+  o numerador da incidência: frações muito diferentes produzem incidências
+  fora da mesma escala. `casos_descartados` zero costuma significar "nada
+  encerrado ainda".
 - `filtro_localidade` — presente quando a consulta usou nome de bairro. Se o
   nome existir em mais de uma cidade suportada e a UF não for informada,
   traz `ambiguidade` com as alternativas.

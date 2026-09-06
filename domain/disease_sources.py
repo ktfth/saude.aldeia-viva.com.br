@@ -52,6 +52,11 @@ DISEASE_SOURCES: dict[str, DiseaseSource] = {
         file_prefix="DENG",
         first_year=2000,
         warning_codes=frozenset({"11"}),
+        # "12" e a classificacao atual de dengue grave; "2", "3" e "4" sao da
+        # classificacao antiga e nao aparecem em DENGBR26.csv (verificado em
+        # 60 mil linhas). Ficam porque o parametro `ano` permite carregar
+        # arquivos anteriores, onde ocorrem — ver
+        # test_legacy_dengue_severe_classifications_count_as_grave.
         severe_codes=frozenset({"2", "3", "4", "12"}),
     ),
     "CHIK": DiseaseSource(

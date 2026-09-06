@@ -80,6 +80,23 @@ Duas consequências:
   pode significar "não houve" ou "a fonte não traz". Consulte a lista antes de
   afirmar ausência.
 
+### Quanto de "caso provável" ainda está em aberto
+
+`casos_provaveis` é notificações menos descartados — a definição padrão do
+SINAN. Mas parte desses casos ainda não foi investigada, e a fração varia
+muito entre agravos: medido nesta carga, de 0% na Febre Amarela a **100% na
+Hanseníase**, com 45,4% na Dengue e 41,6% no conjunto.
+
+Isso é normal em dado recente: o encerramento é assíncrono. A consequência é
+que `casos_provaveis` é o **numerador da incidência**, então agravos com
+frações pendentes muito diferentes produzem incidências fora da mesma escala.
+
+`doencas[].composicao` declara a fração em cada agravo, e
+`metadata.composicao_dos_casos` resume.
+
+`casos_descartados` igual a zero — hoje o caso de oito dos dez agravos —
+costuma significar "nada encerrado ainda", não "nada descartado".
+
 ## Como o nível de risco nasce
 
 Cada agravo tem o seu nível, calculado com o seu próprio perfil. O nível do
