@@ -6,3 +6,13 @@ __pycache__/
 .pytest_cache/
 .vercel
 .cache/
+
+# Saída de execução local — telemetria de uso, cresce a cada requisição.
+data/usage.jsonl
+
+# Caches de ferramentas locais.
+.ralph/
+.pi-lens/
+
+# Override de composição local, por máquina.
+docker-compose.override.yml
