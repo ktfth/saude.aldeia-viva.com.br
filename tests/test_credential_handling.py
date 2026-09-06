@@ -195,3 +195,51 @@ class TestRefreshPathIsWired(unittest.TestCase):
             report = app.fetch_epidemiology_report(2026)
         self.assertTrue(report["metadata"]["erros"])
         self.assertEqual(report["metadata"]["status"], "empty")
+
+
+class TestUsageLogNeverBreaksTheRequest(unittest.TestCase):
+    """Telemetria não pode derrubar a API.
+
+    Encontrado no deploy: em produção na Vercel o sistema de arquivos é
+    somente leitura fora de `/tmp`, e `UsageTracker.log_usage` abria o arquivo
+    para escrita sem proteção. O middleware só registra caminhos `/v1/*`, então
+    o efeito era exato e desconcertante:
+
+        /dashboard        -> 200
+        /v1/risk-index    -> 500
+        /v1/metadata      -> 500
+        /v1/diseases      -> 500
+
+    O painel funcionava e a API inteira caía. Contar requisições é telemetria;
+    falhar ao contar não pode custar a resposta.
+    """
+
+    def test_a_read_only_destination_does_not_raise(self) -> None:
+        from pathlib import Path
+        from unittest.mock import patch
+
+        tracker = app.UsageTracker.__new__(app.UsageTracker)
+        tracker.log_path = Path("/caminho/somente/leitura/usage.jsonl")
+        tracker._lock = threading.Lock()
+
+        with patch("builtins.open", side_effect=OSError("read-only file system")):
+            tracker.log_usage("anonymous", "/v1/risk-index", "GET", 200)
+
+    def test_the_endpoint_answers_even_when_logging_fails(self) -> None:
+        from unittest.mock import patch
+
+        app.rate_limiter.reset()
+        with patch.object(
+            app.usage_tracker, "log_usage", side_effect=OSError("read-only")
+        ):
+            with TestClient(app.app) as client:
+                response = client.get("/v1/diseases")
+        self.assertEqual(response.status_code, 200)
+
+    def test_a_directory_that_cannot_be_created_does_not_break_startup(self) -> None:
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with patch.object(Path, "mkdir", side_effect=OSError("read-only")):
+            tracker = app.UsageTracker(Path("/caminho/impossivel/usage.jsonl"))
+        self.assertIsNotNone(tracker)

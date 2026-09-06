@@ -200,7 +200,15 @@ def key_fingerprint(api_key: str) -> str:
 class UsageTracker:
     def __init__(self, log_path: Path):
         self.log_path = log_path
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            # Em produção na Vercel o disco é somente leitura fora de /tmp.
+            # Não poder criar o diretório de log não pode impedir o serviço
+            # de subir.
+            logger.warning(
+                "Diretório do log de uso indisponível (%s): %s", log_path, error
+            )
         # RateLimiter já tinha lock; este não tinha, e escritas concorrentes
         # de processos com múltiplas threads podiam intercalar linhas.
         self._lock = threading.Lock()
@@ -214,9 +222,16 @@ class UsageTracker:
             "status_code": status_code,
         }
         line = json.dumps(entry) + "\n"
-        with self._lock:
-            with open(self.log_path, "a", encoding="utf-8") as handle:
-                handle.write(line)
+        try:
+            with self._lock:
+                with open(self.log_path, "a", encoding="utf-8") as handle:
+                    handle.write(line)
+        except OSError as error:
+            # Contar requisições é telemetria; falhar ao contar não pode custar
+            # a resposta. Em produção na Vercel o disco é somente leitura fora
+            # de /tmp, e a exceção derrubava TODA rota /v1/* com 500 enquanto
+            # /dashboard respondia normalmente.
+            logger.warning("Não foi possível registrar uso: %s", error)
 
 
 class RateLimiter:
@@ -2033,11 +2048,17 @@ async def track_usage_middleware(request: Request, call_next):
     api_key = request.headers.get("X-API-Key", TIER_ANONYMOUS)
     response = await call_next(request)
 
-    # Log usage only for API endpoints
+    # Só as rotas de API são contadas. Isto é telemetria: qualquer falha aqui
+    # é registrada e engolida, porque não pode custar a resposta ao cliente.
+    # Em produção na Vercel a escrita em disco falhava e derrubava TODA rota
+    # /v1/* com 500, enquanto /dashboard respondia normalmente.
     if request.url.path.startswith("/v1/"):
-        usage_tracker.log_usage(
-            api_key, request.url.path, request.method, response.status_code
-        )
+        try:
+            usage_tracker.log_usage(
+                api_key, request.url.path, request.method, response.status_code
+            )
+        except Exception as error:  # noqa: BLE001 - telemetria nunca derruba
+            logger.warning("Falha ao registrar uso: %s", error)
 
     return response
 
