@@ -98,6 +98,62 @@ class TestUsageLogNeverStoresTheKey(unittest.TestCase):
                 self.assertNotIn("premium_partner_key", path.read_text(encoding="utf-8"))
 
 
+class TestASuiteNaoUsaAsChavesDaMaquina(unittest.TestCase):
+    """A suite tem que trazer as proprias chaves.
+
+    `data/users.json` guarda credenciais e nao e versionado. A suite lia esse
+    arquivo do disco, entao passava aqui e falhava em qualquer outro lugar --
+    medido num clone limpo: 8 testes.
+
+    A primeira tentativa de corrigir instalou um fixture em
+    `tests/__init__.py` e NAO funcionou, porque `unittest discover` importa
+    os modulos como top-level: `tests/__init__.py` so roda quando alguem faz
+    `from tests import ...`, o que em varios arquivos acontece depois de
+    `import app`. O caminho ja tinha sido congelado no import. A suite
+    continuou verde aqui, pelo arquivo real -- verde pelo motivo errado, que
+    e a unica coisa pior que vermelho.
+
+    Estas asseroes falham nesse cenario em vez de deixa-lo passar.
+    """
+
+    def test_o_fixture_esta_realmente_em_uso(self) -> None:
+        from pathlib import Path
+
+        usado = app.api_key_manager.path
+        self.assertNotEqual(
+            usado, Path(app.DEFAULT_USERS_DB_PATH),
+            "a suite esta lendo o arquivo de chaves da maquina",
+        )
+
+    def test_as_chaves_carregadas_sao_as_do_fixture(self) -> None:
+        from tests import TEST_USERS
+
+        self.assertEqual(
+            set(app.api_key_manager.keys), set(TEST_USERS["keys"])
+        )
+
+    def test_o_caminho_e_resolvido_a_cada_uso(self) -> None:
+        """Congelar no import foi exatamente o defeito."""
+        import os
+        from unittest.mock import patch
+
+        from pathlib import Path
+
+        with patch.dict(os.environ, {"USERS_DB_PATH": "outro/caminho.json"}):
+            self.assertEqual(app.users_db_path(), Path("outro/caminho.json"))
+
+    def test_sem_nenhuma_origem_o_servico_nao_finge_ter_chaves(self) -> None:
+        """Um deploy sem chaves precisa ficar sem chaves, e nao herdar as daqui."""
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {"USERS_DB_PATH": "nao/existe.json"}, clear=False):
+            os.environ.pop("USERS_DB_JSON", None)
+            manager = app.APIKeyManager()
+            self.assertEqual(manager.keys, {})
+            self.assertIsNone(manager.validate_key("qualquer"))
+
+
 class TestKeyValidation(unittest.TestCase):
     def test_accepts_a_plaintext_key_for_compatibility(self) -> None:
         manager = app.APIKeyManager.from_keys({"chave": {"tier": "free", "rate_limit": 10}})
