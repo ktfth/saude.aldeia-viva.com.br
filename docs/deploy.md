@@ -25,20 +25,47 @@ Duas regras que sustentam o comportamento:
   extensão nativa ausente — ela é descartada e a base anterior permanece. A
   degradação fica declarada em `metadata.carga.cobertura_degradada`.
 
-## Vercel
+## Docker — o alvo que existe no repositório
 
-1. Conecte o repositório ao projeto da Vercel.
-2. Faça o deploy pela CLI ou pelo painel.
-3. Rode as verificações pós-deploy abaixo.
-
-## Docker
-
-O `Dockerfile` e o `docker-compose.yml` na raiz sobem o mesmo serviço, com um
+O `Dockerfile` e o `docker-compose.yml` na raiz sobem o serviço, com um
 `HEALTHCHECK` apontando para `/health`.
 
 ```bash
 docker compose up --build
 ```
+
+## Vercel — configuração ausente
+
+**O repositório não tem configuração de Vercel.** O commit `e129698`
+(2026-04-26, "fix deploy and improved docs") removeu `api/index.py` e
+`vercel.json` — e escreveu, no mesmo commit, a versão anterior deste
+documento afirmando que o deploy era na Vercel. Um deploy hoje subiria sem
+função Python.
+
+Para reativar, dois arquivos:
+
+`api/index.py`
+
+```python
+from app import app
+```
+
+`vercel.json`
+
+```json
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": { "api/index.py": { "maxDuration": 60 } },
+  "routes": [{ "src": "/(.*)", "dest": "/api/index.py" }]
+}
+```
+
+Antes de reativar, considere que a carga completa lê um cache de 17 MB e que
+`api/data/reports/` guarda uma cópia versionada dele — o limite de tamanho da
+função pode ser o motivo pelo qual a configuração foi removida.
+
+`tests/test_docs_contract.py` verifica que este documento não volte a afirmar
+um alvo de deploy cujo artefato não está no repositório.
 
 ## Variáveis de ambiente
 

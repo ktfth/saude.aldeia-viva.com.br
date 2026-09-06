@@ -291,5 +291,53 @@ class TestDeployDocumentsEveryEnvVar(unittest.TestCase):
         text = (DOCS / "deploy.md").read_text(encoding="utf-8")
         self.assertIn("carga", text.lower())
 
+
+class TestDeployTargetsActuallyExist(unittest.TestCase):
+    """O que o deploy.md documenta precisa existir no repositório.
+
+    `api/index.py` continha uma linha — `from app import app` — e era o
+    entrypoint Python da Vercel. O commit `e129698`, de 2026-04-26, com a
+    mensagem "fix deploy and improved docs", o REMOVEU. Não existe
+    `vercel.json`. Sobraram `.vercel/project.json` apontando para um projeto
+    ativo, `api/data/reports/*.json` com 17 MB versionados, um `.pyc` órfão
+    de `index.py` — e a documentação afirmando que o deploy é na Vercel.
+
+    Esta verificação não decide qual caminho é o certo; ela impede que o
+    documento afirme um alvo de deploy cujo artefato não está no repositório.
+    """
+
+    ROOT = DOCS.parent
+
+    def _deploy_text(self) -> str:
+        return (DOCS / "deploy.md").read_text(encoding="utf-8")
+
+    def test_docker_target_has_its_files(self) -> None:
+        text = self._deploy_text()
+        if "docker" not in text.lower():
+            self.skipTest("deploy.md não documenta Docker")
+        self.assertTrue((self.ROOT / "Dockerfile").exists())
+        self.assertTrue((self.ROOT / "docker-compose.yml").exists())
+
+    def test_vercel_is_not_presented_as_working_without_its_files(self) -> None:
+        """Documentar a ausência é honesto; afirmar que funciona não é."""
+        text = self._deploy_text()
+        if "vercel" not in text.lower():
+            self.skipTest("deploy.md não documenta Vercel")
+
+        tem_artefatos = (self.ROOT / "api" / "index.py").exists() or (
+            self.ROOT / "vercel.json"
+        ).exists()
+        if tem_artefatos:
+            return
+
+        # Sem os artefatos, o documento precisa dizer isso em vez de apresentar
+        # a Vercel como caminho pronto.
+        self.assertIn(
+            "configuração ausente",
+            text.lower(),
+            "deploy.md menciona Vercel sem os artefatos e sem declarar que a "
+            "configuração não existe — o leitor conclui que o deploy funciona",
+        )
+
 if __name__ == "__main__":
     unittest.main()

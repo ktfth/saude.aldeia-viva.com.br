@@ -45,10 +45,21 @@ class TestDateParsing(unittest.TestCase):
 
         self.assertEqual(parse_date_value("15/03/2025"), "2025-03-15")
 
-    def test_parse_invalid_returns_original(self):
+    def test_parse_invalid_fails_closed(self):
+        """Antes chamado `test_parse_invalid_returns_original`.
+
+        O teste codificava o defeito como comportamento desejado: devolver a
+        string crua quando nenhum formato batia. Como `update_latest_date`
+        comparava texto, esse valor vencia comparações e virava a última
+        notificação do agravo — `"9999-99-99"` vencia toda data real, e
+        `"21/04/2020"` vencia `"2026-04-21"` por ordem lexicográfica.
+
+        Sem data utilizável, a resposta honesta é nenhuma data: a camada de
+        recência já representa isso como "desconhecido".
+        """
         from app import parse_date_value
 
-        self.assertEqual(parse_date_value("nonsense"), "nonsense")
+        self.assertEqual(parse_date_value("nonsense"), "")
 
 
 class TestTruthinessAndFlags(unittest.TestCase):
