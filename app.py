@@ -1251,7 +1251,8 @@ def render_plans_page(request: Request) -> str:
     Todo número vem de `domain/tiers.py`. A versão anterior trazia os limites
     escritos à mão no HTML e prometia "sem limites: todos os municípios em uma
     única chamada" — impossível em qualquer tier, já que a chamada é limitada
-    a mil registros e existem 5.339 municípios. A promessa agora é a que o
+    a mil registros e a base tem mais de cinco mil municípios. A promessa
+    agora é a que o
     código cumpre: base completa por paginação.
     """
     body = f"""
@@ -1274,7 +1275,7 @@ def render_plans_page(request: Request) -> str:
   <section class="panel section-panel prose" aria-labelledby="incluso-title">
     <h2 id="incluso-title">O que a chave Profissional dá acesso</h2>
     <ul>
-      <li><strong>Base completa:</strong> até {format_rate_limit(MAX_RESULTS_PER_CALL)} registros por chamada; use <code>pagina</code> para percorrer os {format_rate_limit(len(db_clini)) if db_clini else "5.339"} municípios.</li>
+      <li><strong>Base completa:</strong> até {format_rate_limit(MAX_RESULTS_PER_CALL)} registros por chamada; use <code>pagina</code> para percorrer os {format_rate_limit(len(db_clini)) if db_clini else "todos os"} municípios.</li>
       <li><strong>Relatório profissional:</strong> <code>/v1/professional-report</code>, com metadados estendidos.</li>
       <li><strong>Recarga sob demanda:</strong> <code>POST /v1/refresh</code> reprocessa as fontes.</li>
       <li><strong>Limite de requisições:</strong> {format_rate_limit(tier_by_code("premium").rate_limit)} por minuto.</li>
@@ -2051,7 +2052,8 @@ def paginate(rows: list[Any], *, page: int, limit: int) -> list[Any]:
     """Fatia uma página. Página além do fim devolve vazio, não erro.
 
     Sem paginação, a base completa era inalcançável: a chamada é limitada a
-    1.000 registros e existem 5.339 municípios. A página /planos prometia
+    1.000 registros e a base tem mais de cinco mil municípios. A página
+    /planos prometia
     "todos os municípios em uma única chamada", o que nenhum tier conseguia
     cumprir.
     """

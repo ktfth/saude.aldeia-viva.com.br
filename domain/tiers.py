@@ -7,7 +7,7 @@ código: anunciava "100 req/min" para o Profissional, que tem `rate_limit`
 req/min) quanto a chave gratuita (20 registros, 100 req/min), que são ofertas
 diferentes; e prometia "sem limites: todos os municípios em uma única
 chamada", impossível em qualquer tier, já que a chamada é limitada a mil
-registros e existem 5.339 municípios.
+registros e a base tem mais de cinco mil municípios.
 
 Números escritos à mão no HTML não têm como divergir do código se não
 existirem. Esta declaração passa a alimentar a página, o manifesto para

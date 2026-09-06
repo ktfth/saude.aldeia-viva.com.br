@@ -109,6 +109,53 @@ class TestADistribuicaoCobreTodosOsMunicipios(unittest.TestCase):
         )
 
 
+class TestAsPaginasNaoCravamOTamanhoDaBase(unittest.TestCase):
+    """Número que vem do dado não pode estar escrito em prosa.
+
+    Cinco textos afirmavam, no presente, que "existem 5.339 municípios" —
+    verdade em abril, falso desde a primeira recarga, que trouxe 5.408. E
+    trocar por 5.408 só adiaria: o número muda a cada carga.
+
+    A distinção que importa, e que sete outras ocorrências respeitam: uma
+    MEDIÇÃO HISTÓRICA ("medido no relatório real, 0 de 5.339 tinham
+    população") é correta como está e documenta o que se mediu na época. Uma
+    AFIRMAÇÃO NO PRESENTE sobre o tamanho da base tem que vir da base.
+
+    Esta rede cobre o que o usuário vê: nenhuma página pode exibir um número
+    de municípios que discorde da carga em memória.
+    """
+
+    def setUp(self) -> None:
+        ensure_real_report()
+        app.rate_limiter.reset()
+        self.client = TestClient(app.app)
+        self.client.__enter__()
+        self.addCleanup(self.client.__exit__, None, None, None)
+
+    def test_nenhuma_pagina_exibe_uma_contagem_divergente(self) -> None:
+        real = len(app.db_clini)
+        formatado = app.format_rate_limit(real)
+        divergentes = {}
+        for rota in ("/dashboard", "/sobre", "/planos", "/agentes"):
+            app.rate_limiter.reset()
+            html = self.client.get(rota).text
+            # Qualquer número com separador de milhar seguido de "municípios".
+            for achado in re.findall(r"([\d.]{3,})\s*munic", html):
+                if achado != formatado:
+                    divergentes.setdefault(rota, set()).add(achado)
+        self.assertEqual(
+            {r: sorted(v) for r, v in divergentes.items()},
+            {},
+            f"página exibindo contagem que não é a da base ({formatado})",
+        )
+
+    def test_a_pagina_de_planos_cita_o_tamanho_real(self) -> None:
+        """Guarda contra a extração parar de achar contagem alguma."""
+        app.rate_limiter.reset()
+        html = self.client.get("/planos").text
+        self.assertIn(app.format_rate_limit(len(app.db_clini)), html)
+
+
 class TestNinguemMaisEnumeraOsNiveis(unittest.TestCase):
     """A rede geral: impede a quarta tabela de nascer."""
 

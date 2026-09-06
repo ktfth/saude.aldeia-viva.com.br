@@ -61,7 +61,7 @@ vercel --prod
 
 A função roda com o snapshot embarcado: `.vercelignore` exclui
 `data/reports/` e `api/data/`, que somariam 34 MB ao bundle sem acrescentar
-dado nenhum — os mesmos 5.339 municípios já estão em
+dado nenhum — a base inteira já está em
 `bundled_report_snapshot.py`.
 
 Duas variáveis vão no `vercel.json` porque o sistema de arquivos é somente
