@@ -9,3 +9,23 @@ venv
 Dockerfile
 docker-compose*.yml
 .cursor
+
+# Credenciais nao entram no artefato. Uma imagem construida na maquina de
+# quem tem `data/users.json` carregava a chave premium para dentro dela --
+# verificado construindo e inspecionando a imagem. Passe as chaves por
+# `USERS_DB_JSON` ou monte o arquivo em tempo de execucao.
+data/users.json
+
+# Cache local de execucao. Sem isto a imagem herdava os 42 MB da maquina de
+# quem construiu, e o container carregava o relatorio DAQUELE cache em vez do
+# snapshot versionado em `data/reports` -- a imagem deixava de ser
+# reproduzivel. Verificado: sem o cache, o container sobe pelo snapshot
+# embarcado.
+.cache
+data/usage.jsonl
+
+# Nao sao executados em producao.
+tests
+docs
+.ralph
+.pi-lens

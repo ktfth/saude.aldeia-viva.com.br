@@ -154,6 +154,57 @@ class TestASuiteNaoUsaAsChavesDaMaquina(unittest.TestCase):
             self.assertIsNone(manager.validate_key("qualquer"))
 
 
+class TestOArtefatoNaoCarregaCredencial(unittest.TestCase):
+    """A imagem Docker nao pode sair com a chave de quem a construiu.
+
+    Verificado construindo de verdade: a imagem gerada a partir desta arvore
+    de trabalho continha `data/users.json`, porque o `.dockerignore` nao o
+    excluia. Quem recebesse a imagem receberia a chave premium junto.
+
+    Junto saiu o `.cache` local -- 42 MB da maquina de quem constroi, e pior
+    que o peso: o container carregava o relatorio DAQUELE cache em vez do
+    snapshot versionado, entao a imagem nao era reproduzivel. Medido depois
+    da correcao: 345 MB -> 274 MB, e o log passa a dizer "carregado do
+    snapshot embarcado".
+
+    Nota deliberada sobre o `.vercelignore`: ele NAO exclui o arquivo, porque
+    hoje e assim que producao recebe as chaves. Tirar de la sem antes definir
+    `USERS_DB_JSON` no ambiente deixaria a API sem chave alguma. A correcao
+    correta e mover para o segredo, e isso e decisao de quem opera.
+    """
+
+    def test_o_dockerignore_exclui_o_arquivo_de_chaves(self) -> None:
+        from pathlib import Path
+
+        raiz = Path(__file__).resolve().parent.parent
+        regras = {
+            linha.strip()
+            for linha in (raiz / ".dockerignore").read_text(encoding="utf-8").splitlines()
+            if linha.strip() and not linha.strip().startswith("#")
+        }
+        self.assertIn(app.DEFAULT_USERS_DB_PATH, regras)
+
+    def test_o_dockerignore_exclui_o_cache_local(self) -> None:
+        from pathlib import Path
+
+        raiz = Path(__file__).resolve().parent.parent
+        regras = {
+            linha.strip()
+            for linha in (raiz / ".dockerignore").read_text(encoding="utf-8").splitlines()
+            if linha.strip() and not linha.strip().startswith("#")
+        }
+        self.assertIn(".cache", regras)
+
+    def test_o_deploy_md_ensina_a_passar_as_chaves_sem_o_arquivo(self) -> None:
+        from pathlib import Path
+
+        texto = (
+            Path(__file__).resolve().parent.parent / "docs" / "deploy.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("dockerignore", texto)
+        self.assertIn("USERS_DB_JSON", texto)
+
+
 class TestChavesPorVariavelDeAmbiente(unittest.TestCase):
     """`USERS_DB_JSON` e o caminho recomendado no deploy.md.
 

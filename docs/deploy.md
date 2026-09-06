@@ -34,6 +34,20 @@ O `Dockerfile` e o `docker-compose.yml` na raiz sobem o serviço, com um
 docker compose up --build
 ```
 
+A imagem **não** carrega chaves de API: `data/users.json` está no
+`.dockerignore` para que um artefato construído na máquina de quem tem o
+arquivo não saia com a credencial dentro. Passe as chaves pelo ambiente:
+
+```bash
+docker run -p 8000:8000 -e USERS_DB_JSON='{"keys": {"SUA_CHAVE": {"owner": "...", "tier": "premium", "rate_limit": 10000}}}' av-saude
+```
+
+Sem isso o serviço sobe, avisa no log e responde apenas no tier anônimo —
+verificado construindo a imagem a partir de um clone limpo.
+
+O `.cache` local também fica de fora: o container carrega o snapshot
+versionado em `data/reports`, e não o cache da máquina de quem construiu.
+
 ## Vercel
 
 `api/index.py` e `vercel.json` foram removidos pelo commit `e129698`
