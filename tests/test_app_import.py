@@ -4,7 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -493,7 +493,11 @@ class AppImportTest(unittest.TestCase):
         self.assertEqual(first.suffix, ".json")
 
     def test_load_or_refresh_report_uses_aggregate_cache_before_fetching(self) -> None:
+        # A cache passou a ter prazo de validade: uma cache RECENTE dispensa a
+        # busca, uma vencida obriga a tentar. O fixture carimba a data de hoje
+        # para exercitar o primeiro caso. Ver tests/test_cache_freshness.py.
         report = sample_report()
+        report["metadata"]["carregado_em"] = datetime.now(UTC).isoformat()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.object(app, "SINAN_CACHE_DIR", Path(tmpdir)):

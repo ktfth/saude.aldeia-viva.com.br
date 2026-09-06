@@ -1,6 +1,7 @@
 import csv
 import gzip
 import hashlib
+import hmac
 import html
 import io
 import threading
@@ -60,6 +61,7 @@ from ingestion.municipality_lookup import load_municipality_lookup
 from aggregation.recency_enrichment import enrich_report
 from aggregation.population_enrichment import enrich_with_population
 from aggregation.ordering import ORDERINGS, sort_municipalities
+from aggregation.cache_policy import DEFAULT_MAX_AGE_DAYS, cache_is_fresh
 from ingestion.population_lookup import load_population_lookup
 from presentation.signal import (
     render_data_status,
@@ -100,6 +102,21 @@ SINAN_CACHE_DIR = Path(os.getenv("SINAN_CACHE_DIR", ".cache/datasus"))
 APP_ROOT = Path(__file__).resolve().parent
 REPORT_CACHE_VERSION = "risk-report-v1"
 
+
+def report_cache_max_age_days() -> int:
+    """Dias até a cache agregada deixar de ser servida sem tentar renovação.
+
+    Lido a cada chamada, e não no import, para que testes e operação possam
+    ajustá-lo sem reiniciar o processo. `0` desliga a expiração — escape hatch
+    para ambientes sem rede, onde tentar buscar só produz latência e log.
+    """
+    try:
+        return int(
+            os.getenv("SINAN_REPORT_CACHE_MAX_AGE_DAYS", str(DEFAULT_MAX_AGE_DAYS))
+        )
+    except ValueError:
+        return DEFAULT_MAX_AGE_DAYS
+
 # =============================================================================
 # Static assets (Fase 0 - extração de interface para permitir melhorias sustentáveis)
 # =============================================================================
@@ -125,24 +142,62 @@ class APIKeyManager:
                 logger.error(f"Error loading API keys: {e}")
 
     def validate_key(self, api_key: str) -> Optional[dict]:
-        return self.keys.get(api_key)
+        """Valida a chave, aceitando entrada em texto puro ou em hash.
+
+        Uma entrada de `users.json` cuja chave comece com `sha256:` guarda o
+        digest em vez do segredo, o que permite migrar o arquivo sem quebrar
+        quem já usa as chaves atuais. A comparação usa `compare_digest` para
+        não vazar informação pelo tempo de resposta.
+        """
+        if not api_key:
+            return None
+
+        entry = self.keys.get(api_key)
+        if entry is not None:
+            return entry
+
+        digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+        for stored, value in self.keys.items():
+            if not stored.startswith("sha256:"):
+                continue
+            if hmac.compare_digest(stored[len("sha256:") :], digest):
+                return value
+        return None
+
+
+def key_fingerprint(api_key: str) -> str:
+    """Identificador estável de uma chave, sem conter a chave.
+
+    O log de uso gravava o valor cru do cabeçalho X-API-Key em disco, num
+    arquivo append-only, sem rotação. Qualquer envio de logs, backup ou
+    compartilhamento do diretório de dados vazava a credencial. O objetivo do
+    log é contar uso por cliente, e para isso um prefixo de digest basta.
+    """
+    if not api_key or api_key == TIER_ANONYMOUS:
+        return TIER_ANONYMOUS
+    return "key:" + hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
 
 
 class UsageTracker:
     def __init__(self, log_path: Path):
         self.log_path = log_path
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        # RateLimiter já tinha lock; este não tinha, e escritas concorrentes
+        # de processos com múltiplas threads podiam intercalar linhas.
+        self._lock = threading.Lock()
 
     def log_usage(self, api_key: str, path: str, method: str, status_code: int):
         entry = {
             "timestamp": datetime.now(UTC).isoformat(),
-            "api_key": api_key,
+            "api_key": key_fingerprint(api_key),
             "path": path,
             "method": method,
             "status_code": status_code,
         }
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        line = json.dumps(entry) + "\n"
+        with self._lock:
+            with open(self.log_path, "a", encoding="utf-8") as handle:
+                handle.write(line)
 
 
 class RateLimiter:
@@ -253,8 +308,12 @@ PUBLIC_PATHS = ("/dashboard", "/sobre", "/agentes", "/docs", "/openapi.json")
 # fetch_url_bytes and cache_path_for_url moved to ingestion/sinan_loader.py (Fase 0)
 
 
-# load_latest_available_records, normalize_dbf_record and filter_records_by_latest_available_year
-# moved to ingestion/sinan_loader.py (Fase 0 - Ingestão)
+# A "Fase 0" moveu estas funcoes para ingestion/sinan_loader.py e deixou no
+# lugar apenas este comentario — o import nunca foi acrescentado. Resultado:
+# `fetch_epidemiology_report` levantava NameError em toda chamada, e o
+# caminho de recarga de dados ficou morto. Nao aparecia porque a cache em
+# disco nao expirava e os testes de /v1/refresh mockavam a carga inteira.
+from ingestion.sinan_loader import load_latest_available_records
 
 
 # load_municipality_lookup moved to ingestion/municipality_lookup.py (Fase 0 - improved version with caching)
@@ -418,7 +477,7 @@ def apply_report_state(
     cache_hit: bool,
     cache_path: Path | None = None,
     cache_source: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     global db_alertas, db_clini, db_metadata
 
     metadata = dict(report.get("metadata") or {})
@@ -445,6 +504,10 @@ def apply_report_state(
     db_clini = list(enriched.get("municipios") or [])
     db_alertas = list(enriched.get("alertas_altos") or [])
     db_metadata = dict(enriched.get("metadata") or metadata)
+    # Devolve o que de fato foi aplicado. Antes esta funcao nao retornava
+    # nada e `load_or_refresh_report` devolvia o relatorio CRU, entao quem
+    # usasse o valor de retorno via uma forma diferente da que a API serve.
+    return enriched
 
 
 def report_has_content(report: Mapping[str, Any]) -> bool:
@@ -467,36 +530,81 @@ def load_or_refresh_report(
     enabled_codes = [source.codigo for source in enabled_disease_sources()]
     cache_path = report_cache_path(year, enabled_codes)
 
+    # Cache vencida nao e servida sem antes tentar buscar dado novo. Guardada
+    # em `stale_report` para voltar a ser usada se a busca falhar: dado velho
+    # e rotulado (metadata.carga) e melhor que painel vazio.
+    stale_report: dict[str, Any] | None = None
+
     if not force_refresh and not report_cache_disabled() and cache_path.exists():
         try:
             report = load_report_cache(cache_path)
             if not report_has_content(report):
                 raise ValueError("Relatório em cache sem conteúdo útil.")
-            apply_report_state(report, cache_hit=True, cache_path=cache_path)
-            logger.info("Relatório epidemiológico carregado do cache: %s", cache_path)
-            return report
+            if cache_is_fresh(
+                report,
+                signal_reference_date(),
+                max_age_days=report_cache_max_age_days(),
+            ):
+                applied = apply_report_state(
+                    report, cache_hit=True, cache_path=cache_path
+                )
+                logger.info(
+                    "Relatório epidemiológico carregado do cache: %s", cache_path
+                )
+                return applied
+            stale_report = report
+            logger.info(
+                "Cache agregado vencido em %s; tentando recarregar as fontes.",
+                cache_path,
+            )
         except Exception as error:
             logger.warning("Cache agregado inválido em %s: %s", cache_path, error)
 
     bundled_report = None
-    if not force_refresh and load_embedded_report_snapshot is not None:
+    # O snapshot embarcado so entra quando nao ha cache utilizavel. Com uma
+    # cache vencida em maos ele seria um retrocesso: o snapshot e mais antigo
+    # que qualquer cache que o proprio servico tenha gravado.
+    if (
+        not force_refresh
+        and stale_report is None
+        and load_embedded_report_snapshot is not None
+    ):
         try:
             bundled_report = load_embedded_report_snapshot()
         except Exception as error:
             logger.warning("Snapshot embarcado inválido: %s", error)
             bundled_report = None
         if bundled_report is not None and report_has_content(bundled_report):
-            apply_report_state(
+            applied = apply_report_state(
                 bundled_report,
                 cache_hit=True,
                 cache_path=None,
                 cache_source="bundled",
             )
             logger.info("Relatório epidemiológico carregado do snapshot embarcado.")
-            return bundled_report
+            return applied
 
-    report = fetch_epidemiology_report(year)
+    try:
+        report = fetch_epidemiology_report(year)
+    except Exception as error:
+        logger.warning("Falha ao recarregar as fontes: %s", error)
+        report = {"metadata": {"status": "error"}, "municipios": [], "alertas_altos": []}
+
     if not report_has_content(report):
+        # Antes de recorrer ao snapshot embarcado, a cache vencida deste ano
+        # e' o dado mais proximo da realidade que temos.
+        if stale_report is not None:
+            applied = apply_report_state(
+                stale_report,
+                cache_hit=True,
+                cache_path=cache_path,
+                cache_source="disk-stale",
+            )
+            logger.warning(
+                "Recarga sem conteúdo; mantendo a cache vencida de %s.", cache_path
+            )
+            return applied
+
         if load_embedded_report_snapshot is not None:
             try:
                 bundled_report = load_embedded_report_snapshot()
@@ -504,7 +612,7 @@ def load_or_refresh_report(
                 logger.warning("Snapshot embarcado inválido: %s", error)
                 bundled_report = None
         if bundled_report is not None and report_has_content(bundled_report):
-            apply_report_state(
+            applied = apply_report_state(
                 bundled_report,
                 cache_hit=True,
                 cache_path=None,
@@ -520,7 +628,7 @@ def load_or_refresh_report(
                         cache_path,
                         error,
                     )
-            return bundled_report
+            return applied
 
     if not report_cache_disabled():
         try:
@@ -533,13 +641,12 @@ def load_or_refresh_report(
                 error,
             )
 
-    apply_report_state(
+    return apply_report_state(
         report,
         cache_hit=False,
         cache_path=None if report_cache_disabled() else cache_path,
         cache_source="refresh",
     )
-    return report
 
 
 def report_state_ready() -> bool:
@@ -1919,18 +2026,17 @@ async def export_pdf(
     estado: str | None = Query(default=None),
     user: dict = Depends(get_api_user),
 ):
-    if user["tier"] not in {"premium", "admin"}:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Este endpoint requer uma assinatura Premium.",
-        )
-
-    # In a real scenario, we would use a library like ReportLab or WeasyPrint
-    return {
-        "message": "Relatório PDF gerado com sucesso.",
-        "download_url": f"/reports/custom/report-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}.pdf",
-        "note": "A geração de PDF real exige dependências adicionais de sistema.",
-    }
+    # Este endpoint respondia 200 com "Relatório PDF gerado com sucesso" e uma
+    # `download_url` apontando para /reports/custom/..., rota que não existe no
+    # app: um 404 garantido, vendido como sucesso. Para um agente autônomo isso
+    # é pior que um erro — ele registra a operação como concluída e segue.
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail=(
+            "Geração de PDF não implementada. Use /v1/professional-report para "
+            "obter os mesmos dados em JSON e renderizar do seu lado."
+        ),
+    )
 
 
 @app.get(
