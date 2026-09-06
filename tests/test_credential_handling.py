@@ -100,13 +100,11 @@ class TestUsageLogNeverStoresTheKey(unittest.TestCase):
 
 class TestKeyValidation(unittest.TestCase):
     def test_accepts_a_plaintext_key_for_compatibility(self) -> None:
-        manager = app.APIKeyManager.__new__(app.APIKeyManager)
-        manager.keys = {"chave": {"tier": "free", "rate_limit": 10}}
+        manager = app.APIKeyManager.from_keys({"chave": {"tier": "free", "rate_limit": 10}})
         self.assertIsNotNone(manager.validate_key("chave"))
 
     def test_rejects_an_unknown_key(self) -> None:
-        manager = app.APIKeyManager.__new__(app.APIKeyManager)
-        manager.keys = {"chave": {"tier": "free", "rate_limit": 10}}
+        manager = app.APIKeyManager.from_keys({"chave": {"tier": "free", "rate_limit": 10}})
         self.assertIsNone(manager.validate_key("outra"))
 
     def test_accepts_a_hashed_key_entry(self) -> None:
@@ -114,14 +112,12 @@ class TestKeyValidation(unittest.TestCase):
         import hashlib
 
         digest = hashlib.sha256(b"segredo").hexdigest()
-        manager = app.APIKeyManager.__new__(app.APIKeyManager)
-        manager.keys = {f"sha256:{digest}": {"tier": "premium", "rate_limit": 100}}
+        manager = app.APIKeyManager.from_keys({f"sha256:{digest}": {"tier": "premium", "rate_limit": 100}})
         self.assertIsNotNone(manager.validate_key("segredo"))
         self.assertIsNone(manager.validate_key("errado"))
 
     def test_empty_key_is_rejected(self) -> None:
-        manager = app.APIKeyManager.__new__(app.APIKeyManager)
-        manager.keys = {"chave": {"tier": "free"}}
+        manager = app.APIKeyManager.from_keys({"chave": {"tier": "free"}})
         self.assertIsNone(manager.validate_key(""))
 
 

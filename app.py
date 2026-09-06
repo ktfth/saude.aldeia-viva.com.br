@@ -142,15 +142,59 @@ def report_cache_max_age_days() -> int:
 # =============================================================================
 STATIC_DIR = APP_ROOT / "web" / "static"
 
-USERS_DB_PATH = Path(os.getenv("USERS_DB_PATH", "data/users.json"))
+DEFAULT_USERS_DB_PATH = "data/users.json"
+
+
+def users_db_path() -> Path:
+    """Arquivo de chaves de API, lido a cada uso e não no import.
+
+    Mesma razão de `report_cache_max_age_days`: congelar a configuração no
+    import faz o processo depender da ordem em que os módulos são carregados.
+    Aqui isso tinha consequência concreta — `unittest discover` importa os
+    módulos de teste como top-level, então `tests/__init__.py` só executa
+    quando alguém faz `from tests import ...`, o que em vários arquivos
+    acontece DEPOIS de `import app`. A base de chaves da suíte era instalada
+    tarde demais e ficava inerte: a suíte usava o arquivo real da máquina e
+    passava por isso, não pelo fixture.
+    """
+    return Path(os.getenv("USERS_DB_PATH", DEFAULT_USERS_DB_PATH))
 USAGE_LOG_PATH = Path(os.getenv("USAGE_LOG_PATH", "data/usage.jsonl"))
 
 
 class APIKeyManager:
-    def __init__(self, path: Path):
-        self.path = path
-        self.keys = {}
+    def __init__(self, path: Path | None = None):
+        self._fixed_path = path
+        self._in_memory = False
+        self._loaded_from: tuple[str, str | None] | None = None
+        self.keys: dict[str, dict] = {}
         self.load_keys()
+
+    @classmethod
+    def from_keys(cls, keys: Mapping[str, dict]) -> "APIKeyManager":
+        """Gerenciador com chaves em memória, sem origem em disco.
+
+        Existe para os testes de validação, que precisam de um conjunto
+        controlado de chaves. Antes eles usavam `__new__` e atribuíam
+        `keys` direto, o que os acoplava aos atributos privados da classe.
+        """
+        manager = cls.__new__(cls)
+        manager._fixed_path = None
+        manager._in_memory = True
+        manager._loaded_from = None
+        manager.keys = dict(keys)
+        return manager
+
+    @property
+    def path(self) -> Path:
+        return self._fixed_path or users_db_path()
+
+    def _reload_if_source_changed(self) -> None:
+        """Recarrega quando o ambiente passa a apontar para outra origem."""
+        if self._in_memory:
+            return
+        origem = (str(self.path), os.getenv("USERS_DB_JSON"))
+        if origem != self._loaded_from:
+            self.load_keys()
 
     def load_keys(self):
         """Carrega as chaves de `USERS_DB_JSON` ou do arquivo, e declara a falta.
@@ -164,6 +208,9 @@ class APIKeyManager:
         `USERS_DB_JSON` permite ao ambiente carregar as chaves como segredo, em
         vez de depender de um arquivo que o repositório não pode transportar.
         """
+        self._loaded_from = (str(self.path), os.getenv("USERS_DB_JSON"))
+        self.keys = {}
+
         inline = os.getenv("USERS_DB_JSON")
         if inline:
             try:
@@ -200,6 +247,8 @@ class APIKeyManager:
         """
         if not api_key:
             return None
+
+        self._reload_if_source_changed()
 
         entry = self.keys.get(api_key)
         if entry is not None:
@@ -298,7 +347,7 @@ class RateLimiter:
             self.requests = {}
 
 
-api_key_manager = APIKeyManager(USERS_DB_PATH)
+api_key_manager = APIKeyManager()
 usage_tracker = UsageTracker(USAGE_LOG_PATH)
 rate_limiter = RateLimiter()
 
