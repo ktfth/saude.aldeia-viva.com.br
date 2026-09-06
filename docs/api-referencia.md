@@ -6,6 +6,37 @@ Todo exemplo desta página é executado por `tests/test_docs_contract.py`, que
 também compara os parâmetros documentados com a assinatura real de cada
 endpoint. Um exemplo que pare de funcionar quebra a suíte.
 
+## Estabilidade de `/v1` — o que prometemos
+
+Se você vai embarcar esta API no seu produto, é isto que precisa saber.
+
+**O que não muda dentro de `/v1`:**
+
+- Nenhum campo de resposta é removido ou renomeado.
+- Nenhum endpoint publicado desaparece.
+- Nenhum parâmetro obrigatório é acrescentado a um endpoint existente.
+
+**O que pode mudar sem aviso:**
+
+- Campos novos aparecem em respostas. Ignore o que não conhece.
+- Endpoints novos aparecem.
+- Os **valores** mudam quando a base é recarregada — é o ponto do serviço.
+  Trate `metadata.carga` e `recencia` como parte do dado, não como enfeite:
+  eles dizem de quando é o número que você está exibindo.
+
+**Como a promessa é sustentada.** A forma de resposta de todos os endpoints
+públicos está gravada em `contrato-v1.json` — 754 campos — e
+`tests/test_contract_stability.py` compara o serviço vivo com esse arquivo a
+cada execução da suíte. Um campo que suma reprova, nomeando qual. Regravar o
+arquivo é ato deliberado, não conserto de teste.
+
+O `/openapi.json` **não** descreve os corpos de resposta: o FastAPI os publica
+como `schema: {}`. Se você precisa saber quais campos existem, use
+`contrato-v1.json`, e não o schema.
+
+**Depreciação.** Um campo que precise sair é anunciado aqui antes, e continua
+respondendo durante a transição. Uma quebra sem esse caminho é defeito nosso.
+
 ## Autenticação e limites
 
 Sem o cabeçalho `X-API-Key` a requisição é atendida como anônima, e o
