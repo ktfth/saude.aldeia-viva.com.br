@@ -8,3 +8,17 @@
   background: var(--panel);
   box-shadow: var(--shadow);
 }
+
+
+/* Cartao de plano em destaque. Estava como style inline no Python. */
+.link-card.is-featured {
+  border: 2px solid var(--teal);
+}
+
+.tier-limits {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: .82rem;
+  font-variant-numeric: tabular-nums;
+}

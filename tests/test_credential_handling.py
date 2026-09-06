@@ -127,6 +127,7 @@ class TestKeyValidation(unittest.TestCase):
 
 class TestPdfExportIsHonest(unittest.TestCase):
     def setUp(self) -> None:
+        app.rate_limiter.reset()
         self.client = TestClient(app.app)
         self.client.__enter__()
 

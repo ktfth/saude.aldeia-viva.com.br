@@ -16,6 +16,7 @@ import app
 
 class TestResultCountHeaders(unittest.TestCase):
     def setUp(self) -> None:
+        app.rate_limiter.reset()
         self.client = TestClient(app.app)
         self.client.__enter__()
 
@@ -60,6 +61,7 @@ class TestRefreshIsProtected(unittest.TestCase):
     e sem rate limit — o único endpoint pesado do serviço, aberto."""
 
     def setUp(self) -> None:
+        app.rate_limiter.reset()
         self.client = TestClient(app.app)
         self.client.__enter__()
 

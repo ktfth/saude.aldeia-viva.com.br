@@ -61,7 +61,19 @@ from ingestion.municipality_lookup import load_municipality_lookup
 from aggregation.recency_enrichment import enrich_report
 from aggregation.population_enrichment import enrich_with_population
 from aggregation.ordering import ORDERINGS, sort_municipalities
-from aggregation.cache_policy import DEFAULT_MAX_AGE_DAYS, cache_is_fresh
+from aggregation.cache_policy import (
+    DEFAULT_MAX_AGE_DAYS,
+    cache_is_fresh,
+    is_regression,
+    missing_sources,
+)
+from domain.tiers import (
+    MAX_RESULTS_PER_CALL,
+    TIERS,
+    format_rate_limit,
+    tier_by_code,
+    tier_max_results,
+)
 from ingestion.population_lookup import load_population_lookup
 from presentation.signal import (
     render_data_status,
@@ -216,11 +228,22 @@ class RateLimiter:
                 return False
             self.requests[key] = count + 1
 
-            # Clean up old entries (simple)
+            # Descarta janelas antigas quando o dicionário cresce demais.
             if len(self.requests) > 1000:
                 self.requests = {k: v for k, v in self.requests.items() if minute in k}
 
             return True
+
+    def reset(self) -> None:
+        """Zera as janelas de contagem.
+
+        O limite é global ao processo e conta por minuto de relógio, então uma
+        rajada de requisições — uma suíte de testes, por exemplo — esbarra nele
+        legitimamente. Sem uma forma explícita de zerar, o teste seguinte falha
+        por 429 em vez de pelo que estava verificando.
+        """
+        with self.lock:
+            self.requests = {}
 
 
 api_key_manager = APIKeyManager(USERS_DB_PATH)
@@ -477,6 +500,7 @@ def apply_report_state(
     cache_hit: bool,
     cache_path: Path | None = None,
     cache_source: str | None = None,
+    degraded_sources: list[str] | None = None,
 ) -> dict[str, Any]:
     global db_alertas, db_clini, db_metadata
 
@@ -504,6 +528,17 @@ def apply_report_state(
     db_clini = list(enriched.get("municipios") or [])
     db_alertas = list(enriched.get("alertas_altos") or [])
     db_metadata = dict(enriched.get("metadata") or metadata)
+    carga = dict(db_metadata.get("carga") or {})
+    carga["cobertura_degradada"] = bool(degraded_sources)
+    carga["aviso_cobertura"] = (
+        "A última tentativa de recarga não trouxe: "
+        + ", ".join(degraded_sources)
+        + ". A base anterior foi mantida."
+        if degraded_sources
+        else None
+    )
+    db_metadata["carga"] = carga
+    enriched = {**enriched, "metadata": db_metadata}
     # Devolve o que de fato foi aplicado. Antes esta funcao nao retornava
     # nada e `load_or_refresh_report` devolvia o relatorio CRU, entao quem
     # usasse o valor de retorno via uma forma diferente da que a API serve.
@@ -589,6 +624,28 @@ def load_or_refresh_report(
     except Exception as error:
         logger.warning("Falha ao recarregar as fontes: %s", error)
         report = {"metadata": {"status": "error"}, "municipios": [], "alertas_altos": []}
+
+    # Renovar nao pode perder cobertura. Uma carga em que parte das fontes
+    # falhou (rede fora, dependencia nativa ausente) passava em
+    # `report_has_content` e substituia uma base mais completa.
+    if (
+        stale_report is not None
+        and report_has_content(report)
+        and is_regression(report, stale_report)
+    ):
+        perdidos = missing_sources(report, stale_report)
+        applied = apply_report_state(
+            stale_report,
+            cache_hit=True,
+            cache_path=cache_path,
+            cache_source="disk-stale",
+            degraded_sources=perdidos,
+        )
+        logger.warning(
+            "Recarga perderia cobertura (%s); mantendo a cache anterior.",
+            ", ".join(perdidos),
+        )
+        return applied
 
     if not report_has_content(report):
         # Antes de recorrer ao snapshot embarcado, a cache vencida deste ano
@@ -957,57 +1014,83 @@ def render_dashboard_page(request: Request) -> str:
     )
 
 
+def render_tier_cards() -> str:
+    """Cartões de plano gerados da declaração — nunca escritos à mão.
+
+    Os números aqui divergiam do código: a página anunciava 100 req/min para
+    o Profissional, que tem 10.000, e chamava de "Gratuito" tanto o acesso
+    sem chave quanto a chave gratuita, que têm limites diferentes.
+    """
+    cards = []
+    for tier in TIERS:
+        destaque = ' class="link-card is-featured"' if tier.codigo == "premium" else ' class="link-card"'
+        if tier.max_results is None:
+            registros = (
+                f"até {format_rate_limit(MAX_RESULTS_PER_CALL)} registros por chamada, "
+                "base completa por paginação"
+            )
+        else:
+            registros = f"{tier.max_results} registros por chamada"
+        cards.append(
+            f"<div{destaque}>"
+            f"<strong>{escape_html(tier.nome)}</strong>"
+            f"<span>{escape_html(tier.resumo)}</span>"
+            f'<span class="tier-limits">{escape_html(registros)}'
+            f" &middot; {format_rate_limit(tier.rate_limit)} req/min</span>"
+            f"<p>{escape_html(tier.preco)}</p>"
+            "</div>"
+        )
+    return "".join(cards)
+
+
 def render_plans_page(request: Request) -> str:
+    """Página de planos.
+
+    Todo número vem de `domain/tiers.py`. A versão anterior trazia os limites
+    escritos à mão no HTML e prometia "sem limites: todos os municípios em uma
+    única chamada" — impossível em qualquer tier, já que a chamada é limitada
+    a mil registros e existem 5.339 municípios. A promessa agora é a que o
+    código cumpre: base completa por paginação.
+    """
     body = f"""
 <main class="page" id="conteudo-principal">
-  <section class="hero">
-    <div class="prose">
-      <p class="eyebrow">Planos e API Professional</p>
-      <h1>Apoie o projeto e obtenha acesso ilimitado.</h1>
-      <p class="lead">O Aldeia Viva Saúde é um projeto de código aberto que depende de assinaturas para manter a infraestrutura e o processamento de dados.</p>
+  <header class="dash-head">
+    <h1>Planos e chaves de API</h1>
+    <p class="lead">Projeto de código aberto. As assinaturas custeiam a infraestrutura e o processamento das fontes do SINAN.</p>
+  </header>
+
+  <section class="panel section-panel" aria-labelledby="planos-title">
+    <div class="section-head">
+      <div>
+        <h2 id="planos-title">Níveis de acesso</h2>
+        <p class="status-line">Os limites abaixo são os que o serviço aplica de fato — a página lê da mesma declaração que o código usa.</p>
+      </div>
     </div>
+    <div class="link-grid">{render_tier_cards()}</div>
   </section>
-  <div class="text-layout">
-    <section class="panel section-panel prose">
-      <h2>Modelos de Assinatura</h2>
-      <div class="link-grid">
-        <div class="link-card">
-          <strong>Gratuito</strong>
-          <span>Acesso público ao dashboard e API com limites estritos (5 registros por busca, 10 req/min).</span>
-          <p>R$ 0/mês</p>
-        </div>
-        <div class="link-card" style="border: 2px solid var(--teal);">
-          <strong>Profissional</strong>
-          <span>Acesso completo à API, limites ampliados (1000 registros, 100 req/min) e suporte a integração.</span>
-          <p>R$ 149/mês</p>
-        </div>
-        <div class="link-card">
-          <strong>Enterprise</strong>
-          <span>Relatórios customizados, exportação de dados brutos e acesso prioritário a novos agravos.</span>
-          <p>Sob consulta</p>
-        </div>
-      </div>
-      <h2>Por que assinar?</h2>
-      <ul>
-        <li><strong>Sem limites:</strong> Obtenha todos os municípios em uma única chamada.</li>
-        <li><strong>Dados Premium:</strong> Acesso ao endpoint <code>/v1/professional-report</code> com metadados estendidos.</li>
-        <li><strong>Sustentabilidade:</strong> Ajude a manter o serviço de inteligência epidemiológica ativo e gratuito para agentes comunitários.</li>
-      </ul>
-      <div class="actions">
-        <a class="button primary" href="mailto:contato@aldeia-viva.com.br?subject=Assinatura%20Professional">Solicitar Chave API</a>
-      </div>
-    </section>
-    <aside class="text-aside" aria-label="Informações Adicionais">
-      <article class="note-card"><strong>Chaves API</strong><p>Para obter uma chave, envie um e-mail com sua necessidade. Ativamos chaves gratuitas para pesquisadores e ONGs.</p></article>
-      <article class="note-card"><strong>Faturamento</strong><p>Pagamento via PIX ou Boleto para empresas brasileiras.</p></article>
-    </aside>
-  </div>
+
+  <section class="panel section-panel prose" aria-labelledby="incluso-title">
+    <h2 id="incluso-title">O que a chave Profissional dá acesso</h2>
+    <ul>
+      <li><strong>Base completa:</strong> até {format_rate_limit(MAX_RESULTS_PER_CALL)} registros por chamada; use <code>pagina</code> para percorrer os {format_rate_limit(len(db_clini)) if db_clini else "5.339"} municípios.</li>
+      <li><strong>Relatório profissional:</strong> <code>/v1/professional-report</code>, com metadados estendidos.</li>
+      <li><strong>Recarga sob demanda:</strong> <code>POST /v1/refresh</code> reprocessa as fontes.</li>
+      <li><strong>Limite de requisições:</strong> {format_rate_limit(tier_by_code("premium").rate_limit)} por minuto.</li>
+    </ul>
+    <p class="status-line">Todo endpoint devolve <code>X-Total-Results</code>, <code>X-Returned-Results</code>, <code>X-Limit-Applied</code>, <code>X-Page</code> e <code>X-Has-More</code>, para que o cliente saiba quando a resposta foi cortada.</p>
+    <div class="actions">
+      <a class="button primary" href="mailto:contato@aldeia-viva.com.br?subject=Chave%20de%20API">Solicitar chave</a>
+      <a class="button" href="/agentes">Contrato para agentes</a>
+      <a class="button" href="/docs">Documentação da API</a>
+    </div>
+    <p class="status-line">Chaves gratuitas são ativadas para pesquisadores, ONGs e equipes de vigilância municipal. Pagamento por PIX ou boleto.</p>
+  </section>
 </main>"""
     return render_web_page(
         request,
         path="/planos",
         title=f"Planos e API | {SITE_NAME}",
-        description="Assine o Aldeia Viva Saúde para obter acesso profissional à API epidemiológica.",
+        description="Níveis de acesso à API epidemiológica do Aldeia Viva Saúde.",
         body=body,
         json_ld=base_json_ld(request)
         + [breadcrumb_json_ld(request, "Planos", "/planos")],
@@ -1395,11 +1478,20 @@ def agent_manifest(request: Request) -> dict[str, Any]:
         "base_url": base,
         "freshness": agent_freshness(),
         "limits": {
-            "anonymous": {
-                "max_results": TIER_MAX_LIMIT["anonymous"],
-                "rate_limit_per_minute": 10,
+            "tiers": {
+                tier.codigo: {
+                    "name": tier.nome,
+                    "max_results_per_call": tier.max_results or MAX_RESULTS_PER_CALL,
+                    "rate_limit_per_minute": tier.rate_limit,
+                    "price": tier.preco,
+                }
+                for tier in TIERS
             },
-            "free": {"max_results": TIER_MAX_LIMIT["free"]},
+            "max_results_per_call": MAX_RESULTS_PER_CALL,
+            "pagination": (
+                "Use `pagina` junto com `limite`. O cabeçalho X-Has-More diz se "
+                "existe página seguinte; X-Total-Results dá o total do filtro."
+            ),
             "note": (
                 "Sem cabeçalho X-API-Key, `limite` é rebaixado silenciosamente ao teto "
                 "do tier anônimo. Leia os cabeçalhos de resposta para saber se houve corte."
@@ -1408,6 +1500,8 @@ def agent_manifest(request: Request) -> dict[str, Any]:
                 "X-Total-Results": "total de registros que satisfazem o filtro",
                 "X-Returned-Results": "quantos vieram nesta resposta",
                 "X-Limit-Applied": "teto efetivamente aplicado",
+                "X-Page": "página devolvida",
+                "X-Has-More": "true quando existe página seguinte",
             },
         },
         "interpretation": [
@@ -1452,7 +1546,7 @@ def agent_manifest(request: Request) -> dict[str, Any]:
             "/v1/high-alerts": {
                 "method": "GET",
                 "description": "Alertas altos e críticos por município, doença e vírus.",
-                "query": ["municipio", "estado", "doenca", "limite"],
+                "query": ["municipio", "estado", "doenca", "pagina", "limite"],
             },
             "/v1/risk-index": {
                 "method": "GET",
@@ -1464,6 +1558,7 @@ def agent_manifest(request: Request) -> dict[str, Any]:
                     "somente_altos",
                     "nivel_minimo",
                     "ordenar",
+                    "pagina",
                     "limite",
                 ],
                 "ordenacoes": list(ORDERINGS),
@@ -1558,7 +1653,8 @@ def llms_text(request: Request) -> str:
     idade = f"{age} dia(s)" if age is not None else "idade desconhecida"
     current = recency.get("agravos_com_fonte_do_ano_corrente")
     total = recency.get("agravos_total")
-    teto = TIER_MAX_LIMIT["anonymous"]
+    anonimo = tier_by_code(TIER_ANONYMOUS)
+    teto = anonimo.max_results if anonimo else 5
     return f"""# {SITE_NAME}
 
 {SITE_DESCRIPTION}
@@ -1637,17 +1733,35 @@ def escape_html(value: Any) -> str:
 TIER_ANONYMOUS = "anonymous"
 
 
-TIER_MAX_LIMIT = {"anonymous": 5, "free": 20}
+def paginate(rows: list[Any], *, page: int, limit: int) -> list[Any]:
+    """Fatia uma página. Página além do fim devolve vazio, não erro.
+
+    Sem paginação, a base completa era inalcançável: a chamada é limitada a
+    1.000 registros e existem 5.339 municípios. A página /planos prometia
+    "todos os municípios em uma única chamada", o que nenhum tier conseguia
+    cumprir.
+    """
+    start = (page - 1) * limit
+    return rows[start : start + limit]
 
 
 def tier_limit(user: Mapping[str, Any], requested: int) -> int:
-    """Teto de resultados por tier. Antes estava duplicado em cada endpoint."""
-    ceiling = TIER_MAX_LIMIT.get(str(user.get("tier")))
+    """Teto de resultados por chamada, lido da declaração de tiers.
+
+    Antes o teto estava escrito em dois lugares (aqui e, com outros números,
+    no HTML de /planos). A autoridade agora é `domain/tiers.py`.
+    """
+    ceiling = tier_max_results(user.get("tier"))
     return min(requested, ceiling) if ceiling else requested
 
 
 def declare_result_counts(
-    response: Response | None, *, total: int, returned: int, limit: int
+    response: Response | None,
+    *,
+    total: int,
+    returned: int,
+    limit: int,
+    page: int = 1,
 ) -> None:
     """Publica o corte em headers.
 
@@ -1660,10 +1774,16 @@ def declare_result_counts(
     response.headers["X-Total-Results"] = str(total)
     response.headers["X-Returned-Results"] = str(returned)
     response.headers["X-Limit-Applied"] = str(limit)
+    response.headers["X-Page"] = str(page)
+    response.headers["X-Has-More"] = "true" if page * limit < total else "false"
 
 
 async def get_api_user(x_api_key: str | None = Header(None)):
-    tier_info = {"tier": TIER_ANONYMOUS, "rate_limit": 10}
+    anonymous = tier_by_code(TIER_ANONYMOUS)
+    tier_info = {
+        "tier": TIER_ANONYMOUS,
+        "rate_limit": anonymous.rate_limit if anonymous else 10,
+    }
     request_key = TIER_ANONYMOUS
 
     if x_api_key:
@@ -1875,7 +1995,15 @@ async def get_risk_index(
             "mil habitantes e é o que compara municípios de portes diferentes."
         ),
     ),
-    limite: int = Query(default=100, ge=1, le=1000),
+    pagina: int = Query(
+        default=1,
+        ge=1,
+        description=(
+            "Página de resultados, usada junto com `limite`. O cabeçalho "
+            "X-Has-More indica se existe página seguinte."
+        ),
+    ),
+    limite: int = Query(default=100, ge=1, le=MAX_RESULTS_PER_CALL),
     response: Response = None,  # type: ignore[assignment]
     user: dict = Depends(get_api_user),
 ):
@@ -1900,8 +2028,14 @@ async def get_risk_index(
         nivel_minimo=nivel_minimo,
     )
     rows = sort_municipalities(rows, ordenar)
-    page = rows[:limite] if rows else []
-    declare_result_counts(response, total=len(rows), returned=len(page), limit=limite)
+    page = paginate(rows, page=pagina, limit=limite)
+    declare_result_counts(
+        response,
+        total=len(rows),
+        returned=len(page),
+        limit=limite,
+        page=pagina,
+    )
     if not rows:
         return {"message": "Dados não disponíveis para o filtro."}
     return page
@@ -1919,7 +2053,8 @@ async def get_high_alerts(
     doenca: str | None = Query(
         default=None, description="Filtra por nome ou código: DENG, CHIK ou ZIKA."
     ),
-    limite: int = Query(default=100, ge=1, le=1000),
+    pagina: int = Query(default=1, ge=1),
+    limite: int = Query(default=100, ge=1, le=MAX_RESULTS_PER_CALL),
     response: Response = None,  # type: ignore[assignment]
     user: dict = Depends(get_api_user),
 ) -> dict[str, Any]:
@@ -1928,12 +2063,19 @@ async def get_high_alerts(
     alerts = filter_alerts(
         db_alertas, municipio=municipio, estado=estado, doenca=doenca
     )
-    page = alerts[:limite]
-    declare_result_counts(response, total=len(alerts), returned=len(page), limit=limite)
+    page = paginate(alerts, page=pagina, limit=limite)
+    declare_result_counts(
+        response,
+        total=len(alerts),
+        returned=len(page),
+        limit=limite,
+        page=pagina,
+    )
     return {
         "metadata": db_metadata,
         "total": len(alerts),
         "retornados": len(page),
+        "pagina": pagina,
         "limite_aplicado": limite,
         "alerts": page,
     }

@@ -20,6 +20,7 @@ import app
 
 class AgentSurfaceTest(unittest.TestCase):
     def setUp(self) -> None:
+        app.rate_limiter.reset()
         self.client = TestClient(app.app)
         self.client.__enter__()
 
@@ -49,10 +50,17 @@ class TestAgentManifest(AgentSurfaceTest):
         self.assertIn("ano", query)
 
     def test_declares_the_tier_ceiling(self) -> None:
-        """Pedir limite=100 sem chave devolve 5. Isso precisa estar escrito."""
+        """Pedir limite=100 sem chave devolve 5. Isso precisa estar escrito.
+
+        A forma de `limits` passou a ser gerada de `domain/tiers.py`, para que
+        a página de planos e o manifesto não possam divergir do enforcement.
+        """
         manifest = self.manifest()
         self.assertIn("limits", manifest)
-        self.assertEqual(manifest["limits"]["anonymous"]["max_results"], 5)
+        tiers = manifest["limits"]["tiers"]
+        self.assertEqual(tiers["anonymous"]["max_results_per_call"], 5)
+        self.assertEqual(tiers["anonymous"]["rate_limit_per_minute"], 10)
+        self.assertEqual(tiers["premium"]["rate_limit_per_minute"], 10000)
 
     def test_declares_the_result_count_headers(self) -> None:
         manifest = self.manifest()

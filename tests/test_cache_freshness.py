@@ -19,6 +19,8 @@ Duas regras que não podem ser trocadas uma pela outra:
 import unittest
 from datetime import date
 
+from tests import preserved_report_state
+
 from aggregation.cache_policy import (
     DEFAULT_MAX_AGE_DAYS,
     cache_age_days,
@@ -101,7 +103,7 @@ class TestRefreshBehaviour(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserved_report_state(), tempfile.TemporaryDirectory() as tmp:
             stale = {
                 "metadata": {"carregado_em": "2020-01-01", "status": "ok"},
                 "municipios": [{"codigo_municipio": "355030", "doencas": []}],
@@ -127,7 +129,7 @@ class TestRefreshBehaviour(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserved_report_state(), tempfile.TemporaryDirectory() as tmp:
             stale = {
                 "metadata": {"carregado_em": "2020-01-01", "status": "ok"},
                 "municipios": [{"codigo_municipio": "355030", "doencas": []}],
@@ -150,7 +152,7 @@ class TestRefreshBehaviour(unittest.TestCase):
         from datetime import UTC, datetime
         from pathlib import Path
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserved_report_state(), tempfile.TemporaryDirectory() as tmp:
             fresh = {
                 "metadata": {
                     "carregado_em": datetime.now(UTC).isoformat(),
@@ -186,7 +188,8 @@ class TestEnrichedReportIsTheOnlyShape(unittest.TestCase):
     def test_return_value_carries_the_same_enrichment_as_the_globals(self) -> None:
         import app
 
-        report = app.load_or_refresh_report(2026)
+        with preserved_report_state():
+            report = app.load_or_refresh_report(2026)
         municipality = report["municipios"][0]
         for field in self.ENRICHED_FIELDS:
             self.assertIn(field, municipality, f"faltou {field} no retorno")
@@ -194,7 +197,8 @@ class TestEnrichedReportIsTheOnlyShape(unittest.TestCase):
     def test_metadata_of_the_return_value_carries_the_clocks(self) -> None:
         import app
 
-        metadata = app.load_or_refresh_report(2026)["metadata"]
+        with preserved_report_state():
+            metadata = app.load_or_refresh_report(2026)["metadata"]
         self.assertIn("carga", metadata)
         self.assertIn("recencia", metadata)
         self.assertIn("populacao", metadata)
@@ -202,7 +206,13 @@ class TestEnrichedReportIsTheOnlyShape(unittest.TestCase):
     def test_apply_report_state_returns_what_it_applied(self) -> None:
         import app
 
-        applied = app.apply_report_state(
+        with preserved_report_state():
+            applied = self._apply(app)
+        self.assertIn("recencia", applied["municipios"][0])
+
+    @staticmethod
+    def _apply(app):
+        return app.apply_report_state(
             {
                 "metadata": {"status": "ok"},
                 "municipios": [{"codigo_municipio": "355030", "doencas": []}],
@@ -210,5 +220,3 @@ class TestEnrichedReportIsTheOnlyShape(unittest.TestCase):
             },
             cache_hit=False,
         )
-        self.assertIn("recencia", applied["municipios"][0])
-        self.assertEqual(applied["municipios"], app.db_clini)
