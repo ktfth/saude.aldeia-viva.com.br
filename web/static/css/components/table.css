@@ -19,9 +19,31 @@ th, td {
 }
 
 td { line-height: 1.45; }
-td:first-child { min-width: 170px; }
-td:nth-child(2) { min-width: 120px; }
-td:nth-child(5) { max-width: 520px; }
+td:first-child { min-width: 190px; }
+td:nth-child(2) { min-width: 130px; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+th.num { text-align: right; }
+
+/* Linha secundária dentro da célula: substitui os <br> + span soltos e
+   mantém a densidade sem inventar uma coluna nova para cada fato. */
+.cell-sub {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: .78rem;
+  line-height: 1.35;
+}
+
+.cell-deaths { color: var(--red); font-weight: 700; }
+.cell-muted { color: var(--muted); }
+
+/* Toda a linha é acionável: clique, Enter ou Espaço. Antes respondia
+   apenas ao mouse, sem foco visível e sem papel semântico. */
+.municipality-row { cursor: pointer; }
+.municipality-row:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: -2px;
+}
 
 th {
   position: sticky;
@@ -47,4 +69,53 @@ tr:last-child td { border-bottom: 0; }
   display: block;
   color: var(--ink);
   margin-bottom: 4px;
+}
+
+
+/* ---------------------------------------------------------------------------
+   Tabela em tela estreita.
+
+   O DESIGN.md afirmava que existia um layout de cartões por `data-label` para
+   mobile. Os atributos estavam no HTML, mas a media query nunca foi escrita:
+   em 390px a tabela apenas rolava lateralmente e o agente de campo via metade
+   das colunas. Aqui a promessa passa a existir de fato.
+   --------------------------------------------------------------------------- */
+
+@media (max-width: 720px) {
+  .table-wrap { overflow-x: visible; border: 0; }
+
+  table { min-width: 0; }
+
+  thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  tbody tr {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 6px 12px;
+    margin-bottom: 10px;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: #fff;
+  }
+
+  tbody td {
+    padding: 0;
+    border: 0;
+  }
+
+  /* Município ocupa a linha inteira; risco e casos dividem a seguinte. */
+  td[data-label="Município"] { grid-column: 1 / -1; }
+  td[data-label="Casos"] { text-align: right; }
+  td[data-label="Agravos"] { grid-column: 1 / -1; }
+
+  td.num { text-align: right; }
+
+  .empty-cell { grid-column: 1 / -1; text-align: left; }
 }

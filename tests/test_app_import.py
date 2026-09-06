@@ -376,7 +376,14 @@ class AppImportTest(unittest.TestCase):
         self.assertIn("application/ld+json", response.text)
         self.assertIn('id="risk-dashboard"', response.text)
         self.assertIn("/v1/risk-index", response.text)
-        self.assertIn("Alertas altos", response.text)
+        # A coluna lateral "Alertas altos" foi removida: repetia, em outro
+        # corte, o mesmo dado que a tabela ja ordenava por risco.
+        self.assertNotIn("Alertas altos", response.text)
+        # No lugar entrou a idade do dado, que era o unico fato invisivel.
+        self.assertIn("data-status", response.text)
+        self.assertIn("signal-strip", response.text)
+        # E o Chart.js de dois pontos deixou de ser carregado.
+        self.assertNotIn("cdn.jsdelivr.net", response.text)
 
     def test_explanation_page_documents_sources_formula_and_granularity(self) -> None:
         seed_web_globals()
@@ -533,8 +540,11 @@ class AppImportTest(unittest.TestCase):
 
         client = TestClient(app.app)
 
+        # /v1/refresh reprocessa a carga inteira: exige chave com escrita.
         with patch.object(app, "load_or_refresh_report", side_effect=fake_refresh) as mocked:
-            response = client.post("/v1/refresh")
+            response = client.post(
+                "/v1/refresh", headers={"X-API-Key": "premium_partner_key"}
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()

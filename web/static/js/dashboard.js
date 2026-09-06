@@ -1,412 +1,341 @@
+/**
+ * Dashboard operacional — Aldeia Viva Saúde
+ *
+ * Removidos nesta reconstrução, com o motivo:
+ *   - Chart.js via CDN (~200 KB) para desenhar uma linha de DOIS pontos.
+ *     Substituído pela tira de agravos em SVG, gerada no servidor, 0 KB.
+ *   - loadChartJs(): a Promise nunca resolvia quando o script já estava em
+ *     carregamento (`if (chartJsLoaded) return;` saía sem chamar resolve),
+ *     travando o await para sempre ao abrir dois municípios em sequência.
+ *   - Comparação automática com o ano anterior: disparava um fetch que, no
+ *     servidor, fazia download síncrono de um relatório inteiro dentro de um
+ *     `async def`, bloqueando o event loop a cada clique numa linha. E
+ *     comparava anos que não são comparáveis: a carga mistura fontes de
+ *     2022 a 2026.
+ *   - Lista lateral de alertas: mesmo dado da tabela em outro corte.
+ *   - Estilos inline com cores fora dos tokens do design system.
+ */
+
 const form = document.getElementById('consulta');
 const rows = document.getElementById('risk-rows');
-const alerts = document.getElementById('alert-list');
 const statusLine = document.getElementById('dashboard-status');
 const submitButton = form.querySelector('button[type="submit"]');
 const ufInput = document.getElementById('estado');
-const levelClass = (value) => String(value || 'baixo').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+const detailPanel = document.getElementById('municipio-detail-panel');
+
 const fmt = new Intl.NumberFormat('pt-BR');
+const levelClass = (value) =>
+  String(value || 'baixo').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
-let chartJsLoaded = false;
+// Mesmas cores de presentation/signal.py. Duplicação consciente e mínima:
+// a tira precisa existir server-side (sem JS) e client-side (após filtro).
+const SOURCE_COLORS = {
+  atual: '#146c43',
+  recente: '#9a5b00',
+  antiga: '#8a6d3b',
+  ausente: '#b8c4bd',
+};
+const SOURCE_LABELS = {
+  atual: 'fonte do ano corrente',
+  recente: 'fonte do ano anterior',
+  antiga: 'fonte de 2 anos ou mais',
+  ausente: 'sem fonte',
+};
+/**
+ * Municípios atualmente em memória.
+ *
+ * A primeira tabela vem renderizada pelo servidor, então nada dela existe em
+ * JS até a primeira consulta. Ligar os eventos dentro de renderRows deixava
+ * essas linhas anunciando role="button" e foco sem responder a nada — uma
+ * promessa de interação falsa, pior para quem navega por teclado do que não
+ * anunciar coisa alguma. A delegação no fim do arquivo cobre os dois casos,
+ * buscando o município sob demanda quando ele não está em memória.
+ */
+let cachedItems = [];
 
-function loadChartJs() {
-  return new Promise((resolve) => {
-    if (window.Chart) {
-      resolve();
-      return;
-    }
-    if (chartJsLoaded) return;
-    chartJsLoaded = true;
-
-    const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
-    script.onload = () => resolve();
-    script.onerror = () => resolve(); // fail gracefully
-    document.head.appendChild(script);
-  });
-}
+const STRIP_WIDTH = 168;
+const STRIP_HEIGHT = 22;
+const STRIP_GAP = 2;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   })[char]);
 }
 
 function badge(value) {
   const level = levelClass(value);
-  const label = { critico: 'Crítico', alto: 'Alto', moderado: 'Moderado', baixo: 'Baixo' }[level] || value || 'Baixo';
+  const label = { critico: 'Crítico', alto: 'Alto', moderado: 'Moderado', baixo: 'Baixo' }[level]
+    || value || 'Baixo';
   const marker = { critico: '●', alto: '▲', moderado: '◆', baixo: '●' }[level] || '●';
   return `<span class="badge ${level}">${marker} ${escapeHtml(label)}</span>`;
 }
 
-function diseaseNames(items) {
-  if (!items || items.length === 0) return 'Sem alerta alto';
-  return items.map((item) => `${escapeHtml(item.nome || item.doenca)} (${escapeHtml(item.nivel_risco || 'alto')})`).join(', ');
+function signalTag(recencia) {
+  const level = (recencia && recencia.frescor) || 'desconhecido';
+  const label = (recencia && recencia.rotulo) || 'sem data';
+  return `<span class="signal-tag ${escapeHtml(level)}">${escapeHtml(label)}</span>`;
+}
+
+function sourceBucket(fonte, currentYear) {
+  if (!fonte || fonte.ano == null) return 'ausente';
+  if (fonte.do_ano_corrente) return 'atual';
+  return currentYear - Number(fonte.ano) <= 1 ? 'recente' : 'antiga';
+}
+
+function sourceTag(fonte) {
+  if (!fonte || fonte.ano == null) return '<span class="source-tag is-old">sem fonte</span>';
+  const old = fonte.do_ano_corrente ? '' : ' is-old';
+  const title = `Arquivo-fonte deste agravo: ${fonte.ano} (${fonte.rotulo || ''})`.trim();
+  return `<span class="source-tag${old}" title="${escapeHtml(title)}">fonte ${escapeHtml(fonte.ano)}</span>`;
+}
+
+/** Ordena por fonte mais atual primeiro, para a tira ser comparável entre linhas. */
+function sortForStrip(diseases) {
+  return [...diseases].sort((a, b) => {
+    const ya = (a.fonte && a.fonte.ano) || 0;
+    const yb = (b.fonte && b.fonte.ano) || 0;
+    if (ya !== yb) return yb - ya;
+    return String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR');
+  });
+}
+
+function signalStrip(diseases, currentYear) {
+  const items = sortForStrip(diseases || []);
+  if (items.length === 0) {
+    return '<span class="strip-caption">Sem agravos registrados</span>';
+  }
+  const segment = Math.max(3, (STRIP_WIDTH - STRIP_GAP * (items.length - 1)) / items.length);
+  let current = 0;
+  const rects = items.map((disease, index) => {
+    const bucket = sourceBucket(disease.fonte, currentYear);
+    if (bucket === 'atual') current += 1;
+    const year = disease.fonte && disease.fonte.ano != null ? disease.fonte.ano : 'ausente';
+    const title = `${disease.nome || disease.codigo || 'Agravo'} — fonte ${year} (${SOURCE_LABELS[bucket]})`;
+    const x = (index * (segment + STRIP_GAP)).toFixed(1);
+    return `<rect x="${x}" y="0" width="${segment.toFixed(1)}" height="${STRIP_HEIGHT}" rx="2" `
+      + `fill="${SOURCE_COLORS[bucket]}"><title>${escapeHtml(title)}</title></rect>`;
+  }).join('');
+  const label = `${current} de ${items.length} agravos com fonte do ano corrente`;
+  return `<svg class="signal-strip" viewBox="0 0 ${STRIP_WIDTH} ${STRIP_HEIGHT}" `
+    + `preserveAspectRatio="none" role="img" aria-label="${escapeHtml(label)}">${rects}</svg>`
+    + `<span class="strip-caption">${current} de ${items.length} atuais</span>`;
+}
+
+function currentYear() {
+  return new Date().getFullYear();
 }
 
 function renderRows(items) {
-  if (!Array.isArray(items) || items.length === 0) {
-    rows.innerHTML = '<tr><td class="empty-cell" colspan="5"><strong>Nenhum município encontrado.</strong>Tente remover a UF, consultar todos os níveis ou buscar pelo código municipal.</td></tr>';
+  cachedItems = Array.isArray(items) ? items : [];
+  if (cachedItems.length === 0) {
+    rows.innerHTML = '<tr><td class="empty-cell" colspan="4"><strong>Nenhum município encontrado.</strong>'
+      + 'Remova a UF, amplie o nível mínimo ou busque pelo código IBGE.</td></tr>';
     return;
   }
+  const year = currentYear();
   rows.innerHTML = items.map((item) => {
-    let municipioHtml = `<strong>${escapeHtml(item.municipio)}</strong><br><span class="status-line">${escapeHtml(item.estado)} · ${escapeHtml(item.codigo_municipio)}</span>`;
-
     const filtro = item.filtro_localidade;
-    if (filtro && filtro.tipo === "distrito") {
-      municipioHtml = `<strong>${escapeHtml(item.municipio)}</strong><br><span class="status-line">Busca por: ${escapeHtml(filtro.localidade)} → ${escapeHtml(item.estado)} · ${escapeHtml(item.codigo_municipio)}</span>`;
-    }
+    const sub = filtro && (filtro.tipo === 'distrito' || filtro.tipo === 'bairro')
+      ? `${escapeHtml(filtro.localidade)} &rarr; ${escapeHtml(item.estado)} &middot; ${escapeHtml(item.codigo_municipio)}`
+      : `${escapeHtml(item.estado)} &middot; ${escapeHtml(item.codigo_municipio)}`;
+
+    const altas = (item.doencas_altas || []).map((d) => d.nome || d.doenca);
+    const resumo = altas.length
+      ? escapeHtml(altas.slice(0, 2).join(', ')) + (altas.length > 2 ? ` +${altas.length - 2}` : '')
+      : 'sem agravo em nível alto';
+
+    const obitos = Number(item.total_obitos || 0);
+    const obitosHtml = obitos
+      ? `<span class="cell-deaths">${fmt.format(obitos)} óbito(s)</span>`
+      : '<span class="cell-muted">sem óbitos</span>';
 
     return `
-      <tr class="municipality-row" data-codigo="${escapeHtml(item.codigo_municipio)}" style="cursor: pointer;">
-        <td data-label="Município">${municipioHtml}</td>
-        <td data-label="Risco">${badge(item.nivel_risco)}<br><span class="status-line">score ${fmt.format(item.risk_score || 0)}</span></td>
-        <td data-label="Casos">${fmt.format(item.total_casos_provaveis || 0)}</td>
-        <td data-label="Óbitos">${fmt.format(item.total_obitos || 0)}</td>
-        <td data-label="Doenças altas">${diseaseNames(item.doencas_altas)}</td>
-      </tr>
-    `;
+      <tr class="municipality-row" tabindex="0" role="button"
+          data-codigo="${escapeHtml(item.codigo_municipio)}"
+          aria-label="Abrir visão completa de ${escapeHtml(item.municipio)}">
+        <td data-label="Município"><strong>${escapeHtml(item.municipio)}</strong>
+          <span class="cell-sub">${sub}</span>
+          <span class="cell-sub">${resumo}</span></td>
+        <td data-label="Risco">${badge(item.nivel_risco)}
+          <span class="cell-sub">${signalTag(item.recencia)}</span></td>
+        <td data-label="Casos" class="num"><strong>${fmt.format(item.total_casos_provaveis || 0)}</strong>
+          <span class="cell-sub">${obitosHtml}</span></td>
+        <td data-label="Agravos">${signalStrip(item.doencas, year)}</td>
+      </tr>`;
   }).join('');
-
-  // Make rows clickable for complete visibility per municipality
-  document.querySelectorAll('.municipality-row').forEach(row => {
-    row.addEventListener('click', () => {
-      const codigo = row.dataset.codigo;
-      const fullItem = items.find(i => i.codigo_municipio === codigo);
-      if (fullItem) showMunicipioDetail(fullItem);
-    });
-  });
 }
 
-function renderAlerts(items) {
-  if (!Array.isArray(items) || items.length === 0) {
-    alerts.innerHTML = '<p class="status-line">Nenhum alerta alto encontrado para este filtro. Tente ampliar a consulta ou remover filtros.</p>';
+async function openMunicipality(codigo) {
+  const cached = cachedItems.find((item) => item.codigo_municipio === codigo);
+  if (cached) {
+    showMunicipioDetail(cached);
     return;
   }
-  alerts.innerHTML = items.map((item) => {
-    const level = levelClass(item.nivel_risco);
-    return `
-      <article class="alert-item ${level}">
-        <header><strong>${escapeHtml(item.municipio)}/${escapeHtml(item.estado)}</strong>${badge(item.nivel_risco)}</header>
-        <p><strong>${escapeHtml(item.doenca)}</strong> · ${escapeHtml(item.virus)} · ${fmt.format(item.casos_provaveis || 0)} casos prováveis</p>
-        <p>Graves ${fmt.format(item.casos_graves || 0)} · Óbitos ${fmt.format(item.obitos || 0)} · Score ${fmt.format(item.risk_score || 0)}</p>
-      </article>
-    `;
-  }).join('');
+  statusLine.textContent = 'Carregando município...';
+  try {
+    const response = await fetch(
+      `/v1/risk-index?municipio=${encodeURIComponent(codigo)}&limite=1`
+    );
+    const payload = await response.json();
+    const item = Array.isArray(payload)
+      ? payload.find((i) => i.codigo_municipio === codigo) || payload[0]
+      : null;
+    if (item) {
+      showMunicipioDetail(item);
+      statusLine.textContent = `${item.municipio} / ${item.estado}`;
+    } else {
+      statusLine.textContent = 'Não foi possível carregar este município.';
+    }
+  } catch (error) {
+    statusLine.textContent = 'Não foi possível carregar este município.';
+  }
 }
+
+document.addEventListener('click', (event) => {
+  const row = event.target.closest('.municipality-row');
+  if (row) openMunicipality(row.dataset.codigo);
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const row = event.target.closest && event.target.closest('.municipality-row');
+  if (!row) return;
+  event.preventDefault();
+  openMunicipality(row.dataset.codigo);
+});
+
+function showMunicipioDetail(item) {
+  if (!detailPanel || !item) return;
+
+  document.getElementById('detail-municipio-title').textContent =
+    `${item.municipio} / ${item.estado}`;
+
+  const rec = item.recencia || {};
+  const vivos = item.agravos_com_sinal_vivo;
+  const atuais = item.agravos_com_fonte_atual;
+  const total = item.agravos_total;
+  const cobertura = total != null
+    ? ` · ${atuais} de ${total} agravos com fonte do ano corrente`
+    : '';
+  document.getElementById('detail-municipio-subtitle').textContent =
+    `Código ${item.codigo_municipio}${cobertura}`;
+
+  document.getElementById('detail-summary').innerHTML = `
+    <div class="stat-item"><span class="stat-label">Casos prováveis</span>
+      <strong class="stat-value">${fmt.format(item.total_casos_provaveis || 0)}</strong></div>
+    <div class="stat-item"><span class="stat-label">Óbitos</span>
+      <strong class="stat-value is-critical">${fmt.format(item.total_obitos || 0)}</strong></div>
+    <div class="stat-item"><span class="stat-label">Hospitalizações</span>
+      <strong class="stat-value">${fmt.format(item.total_hospitalizacoes || 0)}</strong></div>
+    <div class="stat-item"><span class="stat-label">Sinal mais recente</span>
+      <span class="stat-value">${signalTag(rec)}</span></div>
+    ${vivos != null ? `<div class="stat-item"><span class="stat-label">Agravos com sinal vivo</span>
+      <strong class="stat-value">${vivos} de ${total}</strong></div>` : ''}
+  `;
+
+  const tbody = document.getElementById('detail-diseases-body');
+  const doencas = sortForStrip(item.doencas || []);
+  tbody.innerHTML = doencas.map((d) => `
+    <tr>
+      <td><strong>${escapeHtml(d.nome)}</strong>
+        <span class="cell-sub">${escapeHtml(d.virus || '')}</span></td>
+      <td>${sourceTag(d.fonte)}</td>
+      <td>${signalTag(d.recencia)}</td>
+      <td class="num">${fmt.format(d.casos_provaveis || 0)}</td>
+      <td class="num">${fmt.format(d.casos_graves || 0)}</td>
+      <td class="num">${fmt.format(d.obitos || 0)}</td>
+      <td>${badge(d.nivel_risco)}</td>
+    </tr>`).join('')
+    || '<tr><td class="empty-cell" colspan="7">Sem agravos registrados para este município.</td></tr>';
+
+  detailPanel.hidden = false;
+  detailPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function closeDetailPanel() {
+  if (detailPanel) detailPanel.hidden = true;
+}
+
+document.addEventListener('click', (event) => {
+  if (event.target.closest('#close-detail')) {
+    closeDetailPanel();
+    return;
+  }
+  if (!detailPanel || detailPanel.hidden) return;
+  if (!detailPanel.contains(event.target) && !event.target.closest('.municipality-row')) {
+    closeDetailPanel();
+  }
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && detailPanel && !detailPanel.hidden) closeDetailPanel();
+});
 
 function setLoading(isLoading) {
   submitButton.disabled = isLoading;
-  submitButton.textContent = isLoading ? 'Consultando...' : 'Atualizar';
+  submitButton.textContent = isLoading ? 'Consultando...' : 'Consultar';
   form.setAttribute('aria-busy', isLoading ? 'true' : 'false');
-  rows.closest('.table-wrap')?.setAttribute('aria-busy', isLoading ? 'true' : 'false');
 }
-
-function updateQuickFilterState(level) {
-  document.querySelectorAll('[data-quick-level]').forEach((button) => {
-    button.setAttribute('aria-pressed', (button.dataset.quickLevel || '') === (level || '') ? 'true' : 'false');
-  });
-}
-
-// Mostrar visão completa por município + carregar ano anterior automaticamente (decisão de alto valor)
-async function showMunicipioDetail(item) {
-  const panel = document.getElementById('municipio-detail-panel');
-  if (!panel || !item) return;
-
-  const currentYear = item.periodo?.ano || new Date().getFullYear();
-  const previousYear = currentYear - 1;
-
-  document.getElementById('detail-municipio-title').textContent = `${item.municipio} / ${item.estado}`;
-  document.getElementById('detail-municipio-subtitle').textContent = `Código ${item.codigo_municipio} • Ano atual: ${currentYear} (com comparação automática para ${previousYear})`;
-
-  // Resumo visual mais polido
-  const summaryHtml = `
-    <div class="stat-item">
-      <span class="stat-label">Casos Prováveis</span>
-      <strong style="font-size:1.35rem; display:block; margin-top:2px;">${fmt.format(item.total_casos_provaveis || 0)}</strong>
-    </div>
-    <div class="stat-item">
-      <span class="stat-label">Óbitos Totais</span>
-      <strong style="font-size:1.35rem; display:block; margin-top:2px; color:#b91c1c;">${fmt.format(item.total_obitos || 0)}</strong>
-    </div>
-    <div class="stat-item">
-      <span class="stat-label">Hospitalizações</span>
-      <strong style="font-size:1.35rem; display:block; margin-top:2px;">${fmt.format(item.total_hospitalizacoes || 0)}</strong>
-    </div>
-    <div class="stat-item">
-      <span class="stat-label">Nível de Risco</span>
-      <div style="margin-top:4px;">${badge(item.nivel_risco)}</div>
-    </div>
-  `;
-  document.getElementById('detail-summary').innerHTML = summaryHtml;
-
-  // Tabela de todas as doenças
-  const tbody = document.getElementById('detail-diseases-body');
-  const doencas = item.doencas || [];
-  tbody.innerHTML = doencas.map(d => `
-    <tr>
-      <td>
-        <div style="font-weight:600; color:#111827;">${escapeHtml(d.nome)}</div>
-        <div style="font-size:0.78rem; color:#6b7280; margin-top:1px;">${escapeHtml(d.virus || '')}</div>
-      </td>
-      <td class="num">${fmt.format(d.casos_provaveis || 0)}</td>
-      <td class="num">${fmt.format(d.sinais_alarme || 0)}</td>
-      <td class="num">${fmt.format(d.casos_graves || 0)}</td>
-      <td class="num">${fmt.format(d.hospitalizacoes || 0)}</td>
-      <td class="num" style="font-weight:600;">${fmt.format(d.obitos || 0)}</td>
-      <td class="num" style="font-weight:600;">${fmt.format(d.risk_score || 0)}</td>
-      <td>${badge(d.nivel_risco)}</td>
-    </tr>
-  `).join('');
-
-  panel.style.display = 'block';
-  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-  // === Decisão não recomendada de alto valor: carregar ano anterior automaticamente ===
-  document.getElementById('detail-comparison').innerHTML = `
-    <div style="padding: 14px; background: #f8fafc; border-radius: 10px; border: 1px solid #e2e8f0; font-size: 0.9rem; color: #64748b;">
-      Carregando automaticamente os dados de <strong>${previousYear}</strong> para comparação ano a ano...
-    </div>
-  `;
-
-  try {
-    const prevParams = new URLSearchParams({
-      municipio: item.codigo_municipio,
-      ano: previousYear,
-      limite: '30'
-    });
-
-    const prevRes = await fetch(`/v1/risk-index?${prevParams.toString()}`);
-    if (prevRes.ok) {
-      const prevData = await prevRes.json();
-      const prevItem = Array.isArray(prevData) ? prevData.find(m => m.codigo_municipio === item.codigo_municipio) : null;
-
-      if (prevItem) {
-        renderSimpleYearComparison(item, prevItem, currentYear, previousYear);
-      } else {
-        document.getElementById('detail-comparison').innerHTML = 
-          `<p class="detail-placeholder">Não foram encontrados dados para ${previousYear} neste município.</p>`;
-      }
-    }
-  } catch (e) {
-    document.getElementById('detail-comparison').innerHTML = 
-      `<p class="detail-placeholder">Não foi possível carregar os dados de ${previousYear}.</p>`;
-  }
-}
-
-function renderSimpleYearComparison(current, previous, currentYear, previousYear) {
-  const container = document.getElementById('detail-comparison');
-  if (!container) return;
-
-  const currScore = current.risk_score || 0;
-  const prevScore = previous.risk_score || 0;
-  const scoreDiff = currScore - prevScore;
-  const scorePct = prevScore > 0 ? ((scoreDiff / prevScore) * 100) : 0;
-
-  const currObitos = current.total_obitos || 0;
-  const prevObitos = previous.total_obitos || 0;
-  const obitosDiff = currObitos - prevObitos;
-
-  const currCasos = current.total_casos_provaveis || 0;
-  const prevCasos = previous.total_casos_provaveis || 0;
-  const casosDiff = currCasos - prevCasos;
-  const casosPct = prevCasos > 0 ? ((casosDiff / prevCasos) * 100) : 0;
-
-  const getColor = (diff) => diff > 0 ? '#b91c1c' : (diff < 0 ? '#15803d' : '#64748b');
-  const getArrow = (diff) => diff > 0 ? '▲' : (diff < 0 ? '▼' : '→');
-  const getVerb = (diff) => diff > 0 ? 'piorou' : (diff < 0 ? 'melhorou' : 'manteve-se estável');
-
-  const scoreColor = getColor(scoreDiff);
-  const obitosColor = getColor(obitosDiff);
-  const casosColor = getColor(casosDiff);
-
-  container.innerHTML = `
-    <div style="margin-bottom: 12px; font-size: 0.9rem; color: #475569;">
-      O risco <strong style="color: ${scoreColor};">${getVerb(scoreDiff)}</strong> 
-      ${scoreDiff !== 0 ? `em <strong>${Math.abs(scorePct).toFixed(1)}%</strong>` : ''} 
-      em relação a ${previousYear}.
-    </div>
-
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-      <!-- Ano Anterior -->
-      <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px;">
-        <div style="font-size: 0.7rem; color: #64748b; margin-bottom: 4px;">${previousYear}</div>
-        <div style="font-size: 1.1rem; font-weight: 700; color: #334155;">Score: ${fmt.format(prevScore)}</div>
-        <div style="font-size: 0.85rem; color: #64748b; margin-top: 4px;">
-          ${fmt.format(prevCasos)} casos • ${fmt.format(prevObitos)} óbitos
-        </div>
-      </div>
-
-      <!-- Ano Atual -->
-      <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px;">
-        <div style="font-size: 0.7rem; color: #64748b; margin-bottom: 4px;">${currentYear}</div>
-        <div style="font-size: 1.1rem; font-weight: 700; color: ${scoreColor};">
-          Score: ${fmt.format(currScore)} 
-          <span style="font-size: 0.9rem;">${getArrow(scoreDiff)}</span>
-        </div>
-        <div style="font-size: 0.85rem; color: #64748b; margin-top: 4px;">
-          ${fmt.format(currCasos)} casos 
-          <span style="color: ${casosColor};">(${getArrow(casosDiff)} ${Math.abs(casosPct).toFixed(0)}%)</span> 
-          • ${fmt.format(currObitos)} óbitos 
-          <span style="color: ${obitosColor};">(${getArrow(obitosDiff)})</span>
-        </div>
-      </div>
-    </div>
-
-    <div style="margin-top: 10px; font-size: 0.8rem; color: #64748b;">
-      Diferença no score: <strong style="color: ${scoreColor};">${scoreDiff > 0 ? '+' : ''}${scoreDiff.toFixed(1)}</strong>
-    </div>
-  `;
-
-  // Render the evolution chart (first React-island style component)
-  renderEvolutionChart(currentYear, previousYear, currScore, prevScore);
-}
-
-// Fechar painel de detalhe
-function closeDetailPanel() {
-  const panel = document.getElementById('municipio-detail-panel');
-  if (panel) panel.style.display = 'none';
-}
-
-document.addEventListener('click', function(e) {
-  if (e.target.id === 'close-detail') {
-    closeDetailPanel();
-  }
-});
-
-// Fechar com ESC (melhor UX)
-document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') {
-    const panel = document.getElementById('municipio-detail-panel');
-    if (panel && panel.style.display !== 'none') {
-      closeDetailPanel();
-    }
-  }
-});
-
-// Fechar ao clicar fora do painel (melhor UX)
-document.addEventListener('click', function(e) {
-  const panel = document.getElementById('municipio-detail-panel');
-  if (!panel || panel.style.display === 'none') return;
-
-  // Fecha se clicar fora do painel e não for em uma linha da tabela
-  if (!panel.contains(e.target) && !e.target.closest('.municipality-row')) {
-    closeDetailPanel();
-  }
-});
 
 function renderSkeleton() {
   rows.innerHTML = Array.from({ length: 4 }, () => `
     <tr aria-hidden="true">
-      <td class="empty-cell" colspan="5"><span class="skeleton-line"></span><span class="skeleton-line short" style="margin-top: 10px;"></span></td>
-    </tr>
-  `).join('');
-  alerts.innerHTML = '<article class="alert-item" aria-hidden="true"><span class="skeleton-line"></span><span class="skeleton-line short" style="margin-top: 10px;"></span></article>';
+      <td class="empty-cell" colspan="4"><span class="skeleton-line"></span>
+        <span class="skeleton-line short"></span></td>
+    </tr>`).join('');
 }
 
 async function loadDashboard(event) {
   if (event) event.preventDefault();
   ufInput.value = ufInput.value.toUpperCase().trim();
-  const data = new FormData(form);
+
   const params = new URLSearchParams();
-  for (const [key, value] of data.entries()) {
-    if (value && key !== 'somente_altos') params.set(key, String(value).trim());
+  for (const [key, value] of new FormData(form).entries()) {
+    if (value) params.set(key, String(value).trim());
   }
-  params.set('somente_altos', document.getElementById('somente_altos').checked ? 'true' : 'false');
   params.set('limite', '25');
 
-  statusLine.textContent = 'Atualizando dados...';
+  statusLine.textContent = 'Consultando...';
   setLoading(true);
   renderSkeleton();
   try {
-    const riskResponse = await fetch(`/v1/risk-index?${params.toString()}`);
-    const alertParams = new URLSearchParams();
-    if (params.get('municipio')) alertParams.set('municipio', params.get('municipio'));
-    if (params.get('estado')) alertParams.set('estado', params.get('estado'));
-    alertParams.set('limite', '10');
-    const alertResponse = await fetch(`/v1/high-alerts?${alertParams.toString()}`);
-    if (!riskResponse.ok || !alertResponse.ok) throw new Error('Falha na consulta');
-    const riskPayload = await riskResponse.json();
-    const alertPayload = await alertResponse.json();
-    renderRows(Array.isArray(riskPayload) ? riskPayload : []);
-    renderAlerts(alertPayload.alerts || []);
-    updateQuickFilterState(params.get('nivel_minimo') || '');
-    statusLine.textContent = Array.isArray(riskPayload) ? `${riskPayload.length} município(s) retornado(s).` : (riskPayload.message || 'Consulta concluída.');
+    const response = await fetch(`/v1/risk-index?${params.toString()}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const items = Array.isArray(payload) ? payload : [];
+    renderRows(items);
+    closeDetailPanel();
+
+    // Honestidade sobre o corte: o servidor rebaixa o limite por tier, e o
+    // painel dizia "N município(s)" sem revelar que N era um teto, não um total.
+    const total = Number(response.headers.get('X-Total-Results'));
+    const limited = response.headers.get('X-Limit-Applied');
+    if (Number.isFinite(total) && total > items.length) {
+      statusLine.textContent = `${items.length} de ${fmt.format(total)} município(s)`
+        + (limited ? ` — limite de ${limited} por consulta.` : '.');
+    } else if (items.length) {
+      statusLine.textContent = `${items.length} município(s).`;
+    } else {
+      statusLine.textContent = payload && payload.message
+        ? payload.message
+        : 'Nenhum município para este filtro.';
+    }
   } catch (error) {
     renderRows([]);
-    renderAlerts([]);
-    statusLine.textContent = 'Não foi possível atualizar os dados agora. Tente novamente em alguns instantes.';
+    statusLine.textContent = 'Não foi possível consultar agora. Tente novamente em instantes.';
   } finally {
     setLoading(false);
   }
 }
 
 ufInput.addEventListener('input', () => { ufInput.value = ufInput.value.toUpperCase(); });
+form.addEventListener('submit', loadDashboard);
 form.addEventListener('reset', () => {
   window.setTimeout(() => {
     document.getElementById('municipio').value = '';
     ufInput.value = '';
     document.getElementById('nivel_minimo').value = '';
-    document.getElementById('somente_altos').checked = false;
     loadDashboard();
   });
 });
-document.querySelectorAll('[data-quick-level]').forEach((button) => {
-  button.addEventListener('click', () => {
-    document.getElementById('nivel_minimo').value = button.dataset.quickLevel || '';
-    document.getElementById('somente_altos').checked = ['alto', 'critico'].includes(button.dataset.quickLevel || '');
-    updateQuickFilterState(button.dataset.quickLevel || '');
-    loadDashboard();
-  });
-});
-form.addEventListener('submit', loadDashboard);
-
-
-// === Primeiro React Island leve - Gráfico de Evolução (Chart.js) ===
-async function renderEvolutionChart(currentYear, previousYear, currScore, prevScore) {
-  const container = document.getElementById("evolution-chart-container");
-  const canvas = document.getElementById("evolution-chart");
-  if (!container || !canvas) return;
-
-  await loadChartJs();
-
-  if (!window.Chart) {
-    container.innerHTML = `<p class="detail-placeholder">Gráfico indisponível (Chart.js não carregou).</p>`;
-    return;
-  }
-
-  if (canvas.chartInstance) {
-    canvas.chartInstance.destroy();
-  }
-
-  const ctx = canvas.getContext("2d");
-
-  canvas.chartInstance = new Chart(ctx, {
-    type: "line",
-    data: {
-      labels: [String(previousYear), String(currentYear)],
-      datasets: [{
-        label: "Risk Score",
-        data: [prevScore, currScore],
-        borderColor: "#067a76",
-        backgroundColor: "rgba(6, 122, 118, 0.12)",
-        borderWidth: 3,
-        pointBackgroundColor: "#146c43",
-        pointRadius: 5,
-        tension: 0.25,
-        fill: true
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false }
-      },
-      scales: {
-        y: { beginAtZero: true, grid: { color: "#e2e8f0" }, ticks: { font: { size: 10 } } },
-        x: { grid: { color: "#e2e8f0" }, ticks: { font: { size: 10 } } }
-      }
-    }
-  });
-}

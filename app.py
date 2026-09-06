@@ -58,6 +58,13 @@ from aggregation.utils import normalize_text
 # Ingestion layer extraction in progress (Fase 0).
 from ingestion.municipality_lookup import load_municipality_lookup
 from aggregation.recency_enrichment import enrich_report
+from presentation.signal import (
+    render_data_status,
+    render_signal_strip,
+    render_signal_tag,
+    render_strip_legend,
+    sort_diseases_for_strip,
+)
 from aggregation.report_builder import finalize_municipality_rows, is_death_record, is_hospitalized_record
 from aggregation.utils import any_flag, clean_code, clean_value, first_present, has_any_positive_field, is_truthy_code, parse_date_value, update_latest_date
 
@@ -92,27 +99,6 @@ REPORT_CACHE_VERSION = "risk-report-v1"
 # Static assets (Fase 0 - extração de interface para permitir melhorias sustentáveis)
 # =============================================================================
 STATIC_DIR = APP_ROOT / "web" / "static"
-CSS_PATH = STATIC_DIR / "css" / "main.css"
-JS_DASHBOARD_PATH = STATIC_DIR / "js" / "dashboard.js"
-
-_CSS_CACHE: str | None = None
-
-def load_main_css() -> str:
-    """Load extracted main.css with simple cache + safe fallback to inline constant."""
-    global _CSS_CACHE
-    if _CSS_CACHE is not None:
-        return _CSS_CACHE
-    try:
-        if CSS_PATH.exists():
-            _CSS_CACHE = CSS_PATH.read_text(encoding="utf-8")
-            return _CSS_CACHE
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("Failed to load external CSS at %s, using fallback: %s", CSS_PATH, exc)
-    # Temporary fallback while we finish extraction (will be removed after full cutover)
-    _CSS_CACHE = BASE_CSS  # type: ignore[name-defined]
-    return _CSS_CACHE
-
-
 
 USERS_DB_PATH = Path(os.getenv("USERS_DB_PATH", "data/users.json"))
 USAGE_LOG_PATH = Path(os.getenv("USAGE_LOG_PATH", "data/usage.jsonl"))
@@ -542,75 +528,6 @@ async def ensure_report_state_loaded() -> None:
     if report_state_ready():
         return
     await run_in_threadpool(ensure_report_state_loaded_sync)
-
-
-def fetch_and_process_data(
-    estado: str = "BR", ano: int = DEFAULT_YEAR, mes: int | None = None
-) -> list[dict[str, Any]]:
-    report = fetch_epidemiology_report(ano)
-    state_filter = None if estado.upper() == "BR" else estado
-    return filter_risk_index(report["municipios"], estado=state_filter)
-
-
-# build_epidemiology_report moved to aggregation/report_builder.py (Fase 0)
-# The version below was the original and has been replaced by the import above.
-
-
-def add_record_to_summaries(
-    disease: dict[str, Any],
-    municipality: dict[str, Any],
-    source: DiseaseSource,
-    record: Mapping[str, Any],
-) -> None:
-    disease["total_notificacoes"] += 1
-    municipality["total_notificacoes"] += 1
-
-    classification = clean_code(record.get("CLASSI_FIN"))
-    if classification == "5":
-        disease["casos_descartados"] += 1
-        return
-
-    disease["casos_provaveis"] += 1
-    label = classification_label(source.codigo, classification)
-    disease["classificacoes"][label] = disease["classificacoes"].get(label, 0) + 1
-
-    severity_code = clean_code(record.get(source.severity_code_field))
-    if (
-        severity_code in source.warning_codes
-        or has_any_positive_field(record, source.warning_fields)
-        or any_flag(record, "ALRM_")
-    ):
-        disease["sinais_alarme"] += 1
-    if (
-        severity_code in source.severe_codes
-        or has_any_positive_field(record, source.severe_fields)
-        or any_flag(record, "GRAV_")
-    ):
-        disease["casos_graves"] += 1
-    if is_death_record(record):
-        disease["obitos"] += 1
-    if is_hospitalized_record(source, record):
-        disease["hospitalizacoes"] += 1
-
-    notification_date = parse_date_value(first_present(record, ("DT_NOTIFIC", "DT_IS")))
-    symptom_date = parse_date_value(first_present(record, ("DT_SIN_PRI", "DT_IS")))
-    update_latest_date(disease, "ultima_notificacao", notification_date)
-    update_latest_date(disease, "ultimo_inicio_sintomas", symptom_date)
-
-
-
-
-
-
-
-
-# finalize_disease_summary moved to domain/risk.py (Fase 0)
-# Keeping the call site working via the import at the top of the file.
-
-
-
-# risk_level moved to domain/risk.py (Fase 0)
-
 def extract_municipality_code(record: Mapping[str, Any]) -> str:
     for field in ("ID_MN_RESI", "ID_MUNICIP", "COD_MUN_LPI", "MUNICIPIO", "COMUNINF"):
         code = normalize_municipality_code(record.get(field))
@@ -765,797 +682,115 @@ def render_web_page(
 # These huge strings are kept only as fallback during the transition.
 # Real source of truth is now in web/static/css/main.css and web/static/js/dashboard.js
 # =============================================================================
-BASE_CSS = """
-:root {
-  color-scheme: light;
-  --ink: #17211c;
-  --muted: #5d6b63;
-  --line: #d9e4dd;
-  --panel: #ffffff;
-  --soft: #f4f8f5;
-  --green: #146c43;
-  --teal: #067a76;
-  --amber: #9a5b00;
-  --red: #b42318;
-  --blue: #2457a6;
-  --shadow: 0 18px 45px rgba(23, 33, 28, .08);
-  --radius: 16px;
-}
-* { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
-body {
-  margin: 0;
-  background:
-    radial-gradient(circle at top left, rgba(20, 108, 67, .08), transparent 32rem),
-    linear-gradient(180deg, #f7faf8 0%, #fbfdfb 42%, #f7faf8 100%);
-  color: var(--ink);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  line-height: 1.5;
-}
-a { color: inherit; }
-.skip-link {
-  position: fixed;
-  left: 16px;
-  top: 12px;
-  z-index: 100;
-  transform: translateY(-160%);
-  padding: 10px 14px;
-  border-radius: 999px;
-  background: var(--ink);
-  color: #fff;
-  font-weight: 800;
-  text-decoration: none;
-  transition: transform .18s ease;
-}
-.skip-link:focus { transform: translateY(0); }
-.site-header {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: clamp(20px, 4vw, 48px);
-  min-height: 80px;
-  padding: 16px clamp(22px, 5vw, 72px);
-  border-bottom: 1px solid rgba(20, 108, 67, .16);
-  background: rgba(247, 250, 248, .94);
-  backdrop-filter: blur(16px);
-}
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  text-decoration: none;
-  min-width: min(310px, 42vw);
-  flex-shrink: 0;
-}
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, var(--green), var(--teal));
-  color: #fff;
-  font-weight: 900;
-  letter-spacing: -.03em;
-  box-shadow: 0 10px 24px rgba(20, 108, 67, .22);
-}
-.brand strong { display: block; font-size: 1rem; letter-spacing: 0; }
-.brand small { display: block; max-width: 360px; color: var(--muted); font-size: .78rem; }
-nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-nav a {
-  min-height: 40px;
-  padding: 9px 13px;
-  border-radius: 999px;
-  color: var(--muted);
-  font-size: .92rem;
-  font-weight: 750;
-  text-decoration: none;
-}
-nav a:hover { background: #eef7f2; color: var(--green); }
-nav a.active { background: var(--green); color: #fff; box-shadow: 0 8px 20px rgba(20, 108, 67, .18); }
-.page { max-width: 1360px; margin: 0 auto; padding: clamp(36px, 5vw, 64px) clamp(22px, 5vw, 56px) 72px; }
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(360px, .85fr);
-  gap: clamp(36px, 6vw, 72px);
-  align-items: center;
-  padding: 36px 0 48px;
-}
-.eyebrow {
-  margin: 0 0 12px;
-  color: var(--green);
-  font-size: .82rem;
-  font-weight: 800;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-h1, h2, h3 { margin: 0; line-height: 1.08; letter-spacing: 0; }
-h1 { max-width: 780px; font-size: clamp(2.1rem, 4.2vw, 4rem); letter-spacing: -.04em; }
-h2 { font-size: clamp(1.45rem, 3vw, 2.35rem); letter-spacing: -.03em; }
-h3 { font-size: 1.04rem; }
-.lead { max-width: 760px; color: var(--muted); font-size: clamp(1.05rem, 2vw, 1.24rem); }
-.summary-callout {
-  max-width: 720px;
-  margin: 20px 0 0;
-  padding: 16px 18px;
-  border: 1px solid rgba(20, 108, 67, .16);
-  border-left: 5px solid var(--green);
-  border-radius: 0 14px 14px 0;
-  background: linear-gradient(90deg, #e8f5ee, rgba(255, 255, 255, .78));
-  color: #123d28;
-  font-weight: 800;
-}
-.actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 22px; }
-.button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
-  padding: 10px 15px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
-  color: var(--ink);
-  font-weight: 800;
-  text-decoration: none;
-  cursor: pointer;
-}
-.button.primary { border-color: var(--green); background: var(--green); color: #fff; box-shadow: 0 10px 22px rgba(20, 108, 67, .14); }
-.button.ghost { background: transparent; }
-.button:hover { border-color: rgba(20, 108, 67, .42); }
-.button.primary:hover { background: #0f5d38; }
-.button:active { transform: translateY(0); }
-.button:disabled { cursor: wait; opacity: .72; box-shadow: none; }
-.panel {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel);
-  box-shadow: var(--shadow);
-}
-.radar-panel { padding: clamp(22px, 3vw, 30px); }
-.radar-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.radar-head .eyebrow { margin-bottom: 8px; }
-.data-freshness { padding: 6px 9px; border-radius: 999px; background: var(--soft); color: var(--muted); font-size: .78rem; font-weight: 800; white-space: nowrap; }
-.radar-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
-.metric { min-height: 118px; padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(180deg, #ffffff, var(--soft)); }
-.metric span { color: var(--muted); font-size: .78rem; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
-.metric strong { display: block; margin-top: 10px; font-size: clamp(1.65rem, 4vw, 2.45rem); line-height: 1; letter-spacing: -.04em; }
-.toolbar {
-  display: grid;
-  grid-template-columns: minmax(280px, 1.3fr) minmax(96px, .35fr) minmax(180px, .55fr) minmax(240px, .75fr) minmax(220px, auto);
-  gap: 16px;
-  align-items: end;
-  margin: 28px 0 18px;
-  padding: clamp(18px, 2.4vw, 24px);
-}
-.toolbar-actions { display: flex; gap: 12px; align-items: end; justify-content: flex-end; flex-wrap: nowrap; }
-label { display: grid; gap: 6px; color: var(--muted); font-size: .82rem; font-weight: 700; }
-input, select {
-  width: 100%;
-  min-height: 44px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 9px 11px;
-  background: #fff;
-  color: var(--ink);
-  font: inherit;
-}
-input:hover, select:hover { border-color: rgba(20, 108, 67, .38); }
-input:focus, select:focus, .button:focus { outline: 3px solid rgba(6, 122, 118, .2); outline-offset: 2px; }
-:focus-visible { outline: 3px solid rgba(6, 122, 118, .28); outline-offset: 3px; }
-.switch { display: flex; align-items: center; gap: 9px; min-height: 42px; padding-top: 22px; color: var(--ink); }
-.switch input { width: 18px; min-height: 18px; }
-.quick-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 18px; }
-.quick-filters span { color: var(--muted); font-size: .82rem; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
-.quick-filters .button[aria-pressed="true"] { border-color: var(--green); background: #e7f2ec; color: var(--green); }
-.risk-legend { display: grid; grid-template-columns: repeat(4, minmax(190px, 1fr)); gap: 12px; margin-bottom: 26px; }
-.risk-legend span { display: flex; align-items: center; gap: 10px; min-height: 72px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255, 255, 255, .82); color: var(--muted); font-size: .9rem; line-height: 1.45; }
-.risk-legend .badge { flex: 0 0 auto; }
-.content-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(360px, .65fr); gap: 24px; align-items: start; }
-.section-panel { padding: clamp(22px, 2.8vw, 30px); }
-.section-panel h2 { font-size: clamp(1.75rem, 2.4vw, 2.45rem); }
-.section-head { display: flex; align-items: start; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
-.section-head p { margin: 6px 0 0; color: var(--muted); }
-.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
-table { width: 100%; min-width: 780px; border-collapse: collapse; background: #fff; }
-th, td { padding: 16px 18px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
-td { line-height: 1.45; }
-td:first-child { min-width: 170px; }
-td:nth-child(2) { min-width: 120px; }
-td:nth-child(5) { max-width: 520px; }
-th { position: sticky; top: 0; z-index: 1; color: var(--muted); font-size: .76rem; text-transform: uppercase; letter-spacing: .06em; background: #f7faf8; }
-tbody tr { transition: background .18s ease; }
-tbody tr:hover { background: #f4f8f5; }
-tr:last-child td { border-bottom: 0; }
-.empty-cell { padding: 22px; color: var(--muted); }
-.empty-cell strong { display: block; color: var(--ink); margin-bottom: 4px; }
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 27px;
-  padding: 4px 9px;
-  border-radius: 999px;
-  background: #edf2f7;
-  color: var(--muted);
-  font-size: .78rem;
-  font-weight: 800;
-}
-.badge.critico { background: #fee4e2; color: var(--red); }
-.badge.alto { background: #fff3d6; color: var(--amber); }
-.badge.moderado { background: #e4f4ff; color: var(--blue); }
-.badge.baixo { background: #e8f5ee; color: var(--green); }
-.alert-list { display: grid; gap: 12px; }
-.alert-item { padding: 16px 18px; border: 1px solid var(--line); border-left: 5px solid var(--green); border-radius: 12px; background: #fff; }
-.alert-item.critico { border-left-color: var(--red); }
-.alert-item.alto { border-left-color: var(--amber); }
-.alert-item.moderado { border-left-color: var(--blue); }
-.alert-item header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-.alert-item header strong { line-height: 1.25; }
-.alert-item p { margin: 0; color: var(--muted); line-height: 1.5; }
-.facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; margin: 34px 0; }
-.fact { min-height: 148px; padding: 24px; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
-.fact p { margin: 10px 0 0; color: var(--muted); }
-.text-layout { display: grid; grid-template-columns: minmax(0, .9fr) minmax(320px, .38fr); gap: 24px; align-items: start; }
-.text-aside { display: grid; gap: 14px; }
-.note-card { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(180deg, #ffffff, var(--soft)); }
-.note-card strong { display: block; margin-bottom: 6px; }
-.note-card p { margin: 0; color: var(--muted); }
-
-/* ====== Visão Completa por Município - Design mais premium ====== */
-#municipio-detail-panel {
-  border-radius: 20px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.06);
-}
-
-.detail-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 24px;
-  margin-bottom: 24px;
-  padding-bottom: 18px;
-  border-bottom: 1px solid #f1f5f9;
-}
-
-.detail-title-group {
-  min-width: 0;
-}
-
-.detail-title {
-  font-size: 1.65rem;
-  font-weight: 700;
-  line-height: 1.1;
-  color: #0f172a;
-  margin: 0 0 6px 0;
-  letter-spacing: -0.025em;
-}
-
-.detail-subtitle {
-  font-size: 0.95rem;
-  color: #64748b;
-  margin: 0;
-  line-height: 1.3;
-}
-
-.detail-close-btn {
-  flex-shrink: 0;
-  font-size: 0.9rem;
-  padding: 8px 18px;
-  border-radius: 9999px;
-  min-height: 44px; /* better touch target */
-  min-width: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.detail-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 18px;
-}
-
-.detail-card {
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  border-radius: 16px;
-  padding: 22px 24px;
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.04);
-  transition: box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), 
-              transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.detail-card:hover {
-  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.07);
-  transform: translateY(-1px);
-}
-
-.detail-card--wide {
-  grid-column: 1 / -1;
-}
-
-.detail-section-title {
-  font-size: 1.02rem;
-  font-weight: 600;
-  color: #0f172a;
-  margin: 0 0 14px 0;
-  letter-spacing: -0.01em;
-}
-
-.detail-section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 14px;
-}
-
-.detail-hint {
-  font-size: 0.75rem;
-  color: #94a3b8;
-  font-weight: 500;
-}
-
-.detail-metrics {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
-  gap: 10px;
-}
-
-.detail-metrics .stat-item {
-  background: #f8fafc;
-  border: 1px solid #e0e7ff;
-  border-radius: 12px;
-  padding: 13px 15px;
-  transition: all 0.15s ease;
-}
-
-.detail-metrics .stat-item:hover {
-  border-color: #c7d2fe;
-  background: #f1f5f9;
-}
-
-.stat-label {
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: #64748b;
-  letter-spacing: 0.6px;
-  text-transform: uppercase;
-  display: block;
-  margin-bottom: 3px;
-}
-
-.detail-table-wrapper {
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  overflow: hidden;
-  background: #fff;
-}
-
-.detail-table {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-  font-size: 0.9rem;
-}
-
-.detail-table th {
-  background: #f1f5f9;
-  color: #475569;
-  font-weight: 600;
-  font-size: 0.73rem;
-  text-transform: uppercase;
-  letter-spacing: 0.7px;
-  padding: 11px 14px;
-  text-align: left;
-  border-bottom: 1px solid #e2e8f0;
-}
-
-.detail-table th.num {
-  text-align: right;
-}
-
-.detail-table td {
-  padding: 11px 14px;
-  border-bottom: 1px solid #f1f5f9;
-  vertical-align: middle;
-  color: #334155;
-}
-
-.detail-table tr:last-child td {
-  border-bottom: none;
-}
-
-.detail-table tr:hover td {
-  background: #f8fafc;
-}
-
-.detail-table .num {
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  font-feature-settings: "tnum";
-  font-weight: 500;
-}
-
-.detail-placeholder {
-  padding: 18px 0 4px;
-  color: #64748b;
-  font-size: 0.9rem;
-  line-height: 1.55;
-}
-
-.detail-placeholder p {
-  margin: 0;
-}
-
-/* ====== Responsividade da Visão Completa ====== */
-@media (max-width: 768px) {
-  .detail-header {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 12px;
-    margin-bottom: 20px;
-    padding-bottom: 14px;
-  }
-
-  .detail-close-btn {
-    align-self: flex-end;
-    padding: 10px 20px;
-    font-size: 0.95rem;
-  }
-
-  .detail-grid {
-    grid-template-columns: 1fr;
-    gap: 16px;
-  }
-
-  .detail-card {
-    padding: 18px 20px;
-    border-radius: 14px;
-  }
-
-  .detail-metrics {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
-  }
-
-  .detail-table {
-    font-size: 0.82rem;
-  }
-
-  .detail-table th,
-  .detail-table td {
-    padding: 8px 10px;
-  }
-}
-
-@media (max-width: 480px) {
-  .detail-title {
-    font-size: 1.35rem;
-  }
-
-  .detail-subtitle {
-    font-size: 0.85rem;
-  }
-
-  .detail-metrics {
-    grid-template-columns: 1fr;
-  }
-
-  .detail-table-wrapper {
-    margin: 0 -4px; /* allow table to breathe */
-  }
-
-  .detail-table {
-    font-size: 0.78rem;
-  }
-
-  .detail-table th,
-  .detail-table td {
-    padding: 6px 8px;
-  }
-
-  .detail-close-btn {
-    padding: 8px 16px;
-    font-size: 0.9rem;
-  }
-}
-
-/* Horizontal scroll for the detail table on small screens */
-@media (max-width: 640px) {
-  .detail-table-wrapper {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    border-radius: 12px;
-  }
-
-  .detail-table {
-    min-width: 620px; /* forces horizontal scroll when needed */
-  }
-}
-.prose { max-width: 960px; }
-.prose h2 { margin-top: 34px; }
-.prose h2:first-child { margin-top: 0; }
-.prose p, .prose li { color: var(--muted); }
-.prose li { margin: 8px 0; }
-.prose ul { padding-left: 1.2rem; }
-.prose code, .code-block { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
-.code-block {
-  overflow-x: auto;
-  padding: 18px;
-  border: 1px solid rgba(19, 32, 25, .2);
-  border-radius: 14px;
-  background: #132019;
-  color: #eef8f1;
-  font-size: .9rem;
-  line-height: 1.7;
-}
-.link-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 22px; }
-.link-card { padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: #fff; text-decoration: none; }
-.link-card strong { display: block; color: var(--green); font-size: 1.02rem; }
-.link-card span { display: block; color: var(--muted); margin-top: 6px; }
-.status-line { min-height: 24px; color: var(--muted); font-size: .92rem; }
-.table-hint { margin: 14px 0 0; color: var(--muted); font-size: .86rem; }
-.skeleton-line {
-  display: block;
-  width: 100%;
-  max-width: 560px;
-  height: 14px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #edf4ef 0%, #f8fbf9 45%, #edf4ef 90%);
-  background-size: 220% 100%;
-}
-.skeleton-line.short { max-width: 260px; }
-.site-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 30px clamp(22px, 5vw, 72px);
-  border-top: 1px solid var(--line);
-  color: var(--muted);
-  font-size: .88rem;
-}
-.site-footer div:first-child { display: grid; gap: 4px; }
-.site-footer strong { color: var(--ink); }
-.footer-links { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
-.site-footer a { padding: 7px 10px; border-radius: 999px; color: var(--green); font-weight: 800; text-decoration: none; }
-.site-footer a:hover { background: #e7f2ec; }
-@media (max-width: 1180px) {
-  .site-header { align-items: flex-start; flex-direction: column; }
-  nav { justify-content: flex-start; }
-  .hero { grid-template-columns: 1fr; }
-  .toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .toolbar-actions { justify-content: flex-start; }
-  .content-grid { grid-template-columns: 1fr; }
-}
-@media (max-width: 820px) {
-  .site-header { position: static; }
-  nav { justify-content: flex-start; overflow-x: auto; width: 100%; flex-wrap: nowrap; padding-bottom: 4px; }
-  nav a { white-space: nowrap; }
-  .page { padding: 26px 16px 56px; }
-  .hero, .content-grid, .facts, .link-grid, .risk-legend, .text-layout { grid-template-columns: 1fr; }
-  .quick-filters .button { flex: 1 1 140px; }
-  .toolbar { grid-template-columns: 1fr; }
-  .toolbar-actions { justify-content: stretch; flex-wrap: wrap; }
-  .toolbar-actions .button { flex: 1 1 180px; }
-  .switch { padding-top: 0; }
-  .radar-grid { grid-template-columns: 1fr; }
-  table, thead, tbody, tr, td { display: block; min-width: 0; width: 100%; }
-  thead { display: none; }
-  th { position: static; }
-  tr { padding: 12px; border-bottom: 1px solid var(--line); }
-  td { display: grid; grid-template-columns: 112px 1fr; gap: 10px; max-width: none; min-width: 0; padding: 8px 0; border-bottom: 0; }
-  td::before { content: attr(data-label); color: var(--muted); font-size: .76rem; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
-  .empty-cell { display: block; }
-  .empty-cell::before { content: none; }
-  .site-footer { align-items: flex-start; flex-direction: column; }
-  .footer-links { justify-content: flex-start; }
-}
-@media (prefers-reduced-motion: no-preference) {
-  .button, nav a, .link-card, .alert-item, .metric, .fact { transition: transform .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease; }
-  .button:hover, .link-card:hover, .alert-item:hover, .metric:hover, .fact:hover { transform: translateY(-1px); }
-  .link-card:hover, .fact:hover { border-color: rgba(20, 108, 67, .32); box-shadow: 0 14px 34px rgba(23, 33, 28, .07); }
-  [aria-busy="true"] .skeleton-line { animation: shimmer 1.15s ease-in-out infinite; }
-}
-@keyframes shimmer {
-  from { background-position: 120% 0; }
-  to { background-position: -120% 0; }
-}
-@media (prefers-reduced-motion: reduce) {
-  html { scroll-behavior: auto; }
-  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
-}
-"""
 
 
 def render_dashboard_page(request: Request) -> str:
-    summary = dashboard_summary()
-    alerts = db_alertas[:6]
-    initial_json = json.dumps(
-        {"summary": summary, "alerts": alerts, "municipios": db_clini[:20]},
-        ensure_ascii=False,
-    )
-    alert_count = summary["alertas_altos"]
-    summary_sentence = (
-        f"{format_number(alert_count)} alerta(s) alto(s) ou crítico(s) carregado(s) nas fontes atuais."
-        if alert_count
-        else "Nenhum alerta alto ou crítico carregado nas fontes atuais."
-    )
+    """Painel operacional em quatro blocos.
+
+    Cortados nesta reconstrução, por não mudarem nenhuma decisão:
+      - hero de landing page (h1 gigante, lead, callout, tres botoes)
+      - painel "Radar atual" com quatro métricas nacionais
+      - atalhos rápidos, que duplicavam o seletor de nível mínimo
+      - legenda de risco, redundante com os próprios badges
+      - coluna lateral de alertas, mesmo dado da tabela em outro corte
+      - banner que anunciava ao usuário um detalhe de implementação
+      - gráfico Chart.js de dois pontos (~200 KB de CDN)
+      - payload JSON embutido que script nenhum lia
+
+    Entrou no lugar um único fato, que era o mais importante e o único
+    invisível: a idade do dado.
+    """
+    year = signal_reference_date().year
     period_year = clean_value(db_metadata.get("periodo", {}).get("ano")) or str(
         DEFAULT_YEAR
     )
     body = f"""
 <main class="page" id="conteudo-principal">
   <div id="risk-dashboard">
-  <section class="hero" aria-labelledby="dashboard-title">
-    <div>
-      <p class="eyebrow">Monitoramento epidemiológico municipal</p>
-      <h1 id="dashboard-title">Risco epidemiológico de múltiplos agravos em uma visão operacional.</h1>
-      <p class="lead">Dados reais do SINAN/OpenDataSUS e DBCs do DATASUS, enriquecidos por município e organizados para leitura executiva, técnica e automatizada.</p>
-      <p class="summary-callout">{escape_html(summary_sentence)}</p>
-      <div class="actions">
-        <a class="button primary" href="#consulta">Consultar risco</a>
-        <a class="button" href="/v1/high-alerts">Ver JSON de alertas</a>
-        <a class="button" href="/sobre">Entender metodologia</a>
+    <header class="dash-head">
+      <h1 id="dashboard-title">Risco epidemiológico municipal</h1>
+      <p class="lead">Notificações reais do SINAN/OpenDataSUS por município e agravo, com a idade de cada fonte declarada.</p>
+    </header>
+
+    {render_data_status(db_metadata)}
+
+    <form class="panel toolbar" id="consulta" data-endpoint="/v1/risk-index">
+      <label>Município, distrito ou código IBGE
+        <input id="municipio" name="municipio" value="" placeholder="Ex.: Perus, Goiânia ou 355030" autocomplete="address-level2">
+      </label>
+      <label>UF
+        <input id="estado" name="estado" value="" placeholder="SP" maxlength="2" autocomplete="address-level1" autocapitalize="characters">
+      </label>
+      <label>Nível mínimo
+        <select id="nivel_minimo" name="nivel_minimo">
+          <option value="">Todos os níveis</option>
+          <option value="moderado">Moderado ou acima</option>
+          <option value="alto">Alto ou acima</option>
+          <option value="critico">Apenas crítico</option>
+        </select>
+      </label>
+      <div class="toolbar-actions">
+        <button class="button ghost" type="reset">Limpar</button>
+        <button class="button primary" type="submit">Consultar</button>
       </div>
-    </div>
-    <aside class="panel radar-panel" aria-label="Resumo da carga atual">
-      <div class="radar-head">
-        <div>
-          <p class="eyebrow">Radar atual</p>
-          <h2>Prioridade operacional</h2>
-        </div>
-        <span class="data-freshness">Ano-base {escape_html(period_year)}</span>
-      </div>
-      <div class="radar-grid">
-        {render_metric("Municípios", summary["municipios_monitorados"])}
-        {render_metric("Alertas altos", summary["alertas_altos"])}
-        {render_metric("Casos prováveis", summary["casos_provaveis"])}
-        {render_metric("Óbitos", summary["obitos"])}
-      </div>
-    </aside>
-  </section>
+    </form>
 
-  <form class="panel toolbar" id="consulta" data-endpoint="/v1/risk-index">
-    <label>Município, distrito ou código
-      <input id="municipio" name="municipio" value="perus" placeholder="Ex: Perus, São Paulo ou 355030" autocomplete="address-level2">
-    </label>
-    <label>UF
-      <input id="estado" name="estado" value="SP" placeholder="SP" maxlength="2" autocomplete="address-level1" autocapitalize="characters">
-    </label>
-    <label>Nível mínimo
-      <select id="nivel_minimo" name="nivel_minimo">
-        <option value="">Todos</option>
-        <option value="moderado">Moderado+</option>
-        <option value="alto">Alto+</option>
-        <option value="critico">Crítico</option>
-      </select>
-    </label>
-    <label class="switch"><input id="somente_altos" name="somente_altos" type="checkbox"> Mostrar apenas alto ou crítico</label>
-    <div class="toolbar-actions">
-      <button class="button ghost" type="reset">Limpar filtros</button>
-      <button class="button primary" type="submit">Atualizar</button>
-    </div>
-  </form>
-
-  <div class="quick-filters" aria-label="Atalhos de consulta">
-    <span>Atalhos</span>
-    <button class="button ghost" type="button" data-quick-level="" aria-pressed="true">Todos</button>
-    <button class="button ghost" type="button" data-quick-level="moderado" aria-pressed="false">Moderado+</button>
-    <button class="button ghost" type="button" data-quick-level="alto" aria-pressed="false">Alto+</button>
-    <button class="button ghost" type="button" data-quick-level="critico" aria-pressed="false">Crítico</button>
-  </div>
-
-  <div class="risk-legend" aria-label="Legenda dos níveis de risco">
-    <span>{render_badge("baixo")} baixa concentração ou ausência de sinais graves</span>
-    <span>{render_badge("moderado")} volume ou sinais relevantes</span>
-    <span>{render_badge("alto")} gravidade, concentração ou hospitalizações</span>
-    <span>{render_badge("critico")} óbitos ou score muito elevado</span>
-  </div>
-
-  <div class="content-grid">
     <section class="panel section-panel" aria-labelledby="municipios-title">
       <div class="section-head">
         <div>
-          <h2 id="municipios-title">Resultado por município</h2>
-          <p id="dashboard-status" class="status-line" role="status" aria-live="polite">Pronto para consulta. Clique em uma linha para ver a visão completa.</p>
+          <h2 id="municipios-title">Municípios</h2>
+          <p id="dashboard-status" class="status-line" role="status" aria-live="polite">Ano-base {escape_html(period_year)}. Selecione uma linha para a visão completa por agravo.</p>
         </div>
         <a class="button" href="/sobre">Metodologia</a>
       </div>
       <div class="table-wrap">
         <table aria-describedby="dashboard-status">
-          <thead><tr><th>Município</th><th>Risco</th><th>Casos</th><th>Óbitos</th><th>Doenças altas</th></tr></thead>
+          <thead><tr><th>Município</th><th>Risco</th><th class="num">Casos</th><th>Agravos por idade da fonte</th></tr></thead>
           <tbody id="risk-rows">{render_dashboard_rows(db_clini[:8])}</tbody>
         </table>
       </div>
-      <p class="table-hint">Dica: clique em qualquer linha para abrir a visão completa com todos os indicadores por doença.</p>
+      {render_strip_legend()}
     </section>
 
-    <aside class="panel section-panel" aria-labelledby="alertas-title">
-      <div class="section-head">
-        <div>
-          <h2 id="alertas-title">Alertas altos</h2>
-          <p>Destaques por doença, vírus e município.</p>
+    <div id="municipio-detail-panel" class="panel section-panel" hidden>
+      <div class="detail-header">
+        <div class="detail-title-group">
+          <h2 id="detail-municipio-title" class="detail-title"></h2>
+          <p id="detail-municipio-subtitle" class="detail-subtitle"></p>
         </div>
-      </div>
-      <div class="alert-list" id="alert-list">{render_alert_items(alerts)}</div>
-    </aside>
-  </div>
-
-  <!-- Visão Completa por Município - Design mais refinado -->
-  <div id="municipio-detail-panel" class="panel section-panel" style="display: none; margin-top: 28px;">
-    <div style="margin-bottom: 12px; padding: 10px 14px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; font-size: 0.82rem; color: #166534;">
-      <strong>Comparação automática ativada:</strong> Ao abrir esta visão, os dados do ano anterior são carregados automaticamente para permitir comparação ano a ano.
-    </div>
-
-    <div class="detail-header">
-      <div class="detail-title-group">
-        <h2 id="detail-municipio-title" class="detail-title"></h2>
-        <p id="detail-municipio-subtitle" class="detail-subtitle"></p>
-      </div>
-      <button type="button" class="button ghost detail-close-btn" id="close-detail">
-        <span>Fechar</span>
-      </button>
-    </div>
-
-    <div class="detail-grid">
-      <!-- Resumo com métricas mais elegantes -->
-      <div class="detail-card detail-card--metrics">
-        <h3 class="detail-section-title">Resumo do Município</h3>
-        <div class="detail-metrics" id="detail-summary"></div>
+        <button type="button" class="button ghost detail-close-btn" id="close-detail">Fechar</button>
       </div>
 
-      <!-- Tabela de todos os agravos - visual premium -->
-      <div class="detail-card detail-card--wide">
-        <div class="detail-section-header">
-          <h3 class="detail-section-title">Todos os Agravos</h3>
-          <span class="detail-hint">Dados consolidados do ano</span>
+      <div class="detail-grid">
+        <div class="detail-card detail-card--metrics">
+          <h3 class="detail-section-title">Resumo</h3>
+          <div class="detail-metrics" id="detail-summary"></div>
         </div>
-        <div class="detail-table-wrapper">
-          <table class="detail-table" id="detail-diseases-table">
-            <thead>
-              <tr>
-                <th>Agravo</th>
-                <th class="num">Casos</th>
-                <th class="num">Alarme</th>
-                <th class="num">Graves</th>
-                <th class="num">Hosp.</th>
-                <th class="num">Óbitos</th>
-                <th class="num">Score</th>
-                <th>Nível</th>
-              </tr>
-            </thead>
-            <tbody id="detail-diseases-body"></tbody>
-          </table>
-        </div>
-      </div>
 
-      <!-- Comparação Ano Anterior (agora funcional) -->
-      <div class="detail-card">
-        <h3 class="detail-section-title">Comparação com Ano Anterior</h3>
-        <div id="detail-comparison">
-          <!-- Conteúdo preenchido dinamicamente via JS -->
-          <p class="detail-placeholder">Carregando comparação com o ano anterior...</p>
+        <div class="detail-card detail-card--wide">
+          <div class="detail-section-header">
+            <h3 class="detail-section-title">Agravos</h3>
+            <span class="detail-hint">Cada linha declara a idade da própria fonte</span>
+          </div>
+          <div class="detail-table-wrapper">
+            <table class="detail-table" id="detail-diseases-table">
+              <thead>
+                <tr>
+                  <th>Agravo</th>
+                  <th>Fonte</th>
+                  <th>Sinal</th>
+                  <th class="num">Casos</th>
+                  <th class="num">Graves</th>
+                  <th class="num">Óbitos</th>
+                  <th>Nível</th>
+                </tr>
+              </thead>
+              <tbody id="detail-diseases-body"></tbody>
+            </table>
+          </div>
         </div>
-      </div>
-
-      <!-- Evolução Temporal - Primeiro React island (Chart.js leve) -->
-      <div class="detail-card">
-        <h3 class="detail-section-title">Evolução Temporal</h3>
-        <div id="evolution-chart-container">
-          <canvas id="evolution-chart" height="120"></canvas>
-        </div>
-        <p id="evolution-chart-hint" style="margin-top: 8px; font-size: 0.78rem; color: #64748b;">
-          Dados do ano atual + anterior carregados automaticamente.
-        </p>
       </div>
     </div>
-  </div>
-  <script id="initial-dashboard-data" type="application/json">{escape_html(initial_json)}</script>
   </div>
 </main>"""
     return render_web_page(
@@ -1570,8 +805,7 @@ def render_dashboard_page(request: Request) -> str:
             breadcrumb_json_ld(request, "Dashboard", "/dashboard"),
         ],
         active="dashboard",
-        # Load extracted dashboard JS (Fase 0) - the giant inline string is now in web/static/js/dashboard.js
-        extra_script='<script src="/static/js/dashboard.js"></script>',
+        extra_script='<script src="/static/js/dashboard.js" defer></script>',
     )
 
 
@@ -1784,348 +1018,6 @@ GET /v1/risk-index?municipio=perus&amp;estado=SP&amp;somente_altos=false</pre>
 
 
 # Legacy inline JS (Fase 0) - real implementation moved to web/static/js/dashboard.js
-DASHBOARD_JS = r"""
-const form = document.getElementById('consulta');
-const rows = document.getElementById('risk-rows');
-const alerts = document.getElementById('alert-list');
-const statusLine = document.getElementById('dashboard-status');
-const submitButton = form.querySelector('button[type="submit"]');
-const ufInput = document.getElementById('estado');
-const levelClass = (value) => String(value || 'baixo').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-const fmt = new Intl.NumberFormat('pt-BR');
-
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  })[char]);
-}
-
-function badge(value) {
-  const level = levelClass(value);
-  const label = { critico: 'Crítico', alto: 'Alto', moderado: 'Moderado', baixo: 'Baixo' }[level] || value || 'Baixo';
-  const marker = { critico: '●', alto: '▲', moderado: '◆', baixo: '●' }[level] || '●';
-  return `<span class="badge ${level}">${marker} ${escapeHtml(label)}</span>`;
-}
-
-function diseaseNames(items) {
-  if (!items || items.length === 0) return 'Sem alerta alto';
-  return items.map((item) => `${escapeHtml(item.nome || item.doenca)} (${escapeHtml(item.nivel_risco || 'alto')})`).join(', ');
-}
-
-function renderRows(items) {
-  if (!Array.isArray(items) || items.length === 0) {
-    rows.innerHTML = '<tr><td class="empty-cell" colspan="5"><strong>Nenhum município encontrado.</strong>Tente remover a UF, consultar todos os níveis ou buscar pelo código municipal.</td></tr>';
-    return;
-  }
-  rows.innerHTML = items.map((item) => {
-    let municipioHtml = `<strong>${escapeHtml(item.municipio)}</strong><br><span class="status-line">${escapeHtml(item.estado)} · ${escapeHtml(item.codigo_municipio)}</span>`;
-
-    const filtro = item.filtro_localidade;
-    if (filtro && filtro.tipo === "distrito") {
-      municipioHtml = `<strong>${escapeHtml(item.municipio)}</strong><br><span class="status-line">Busca por: ${escapeHtml(filtro.localidade)} → ${escapeHtml(item.estado)} · ${escapeHtml(item.codigo_municipio)}</span>`;
-    }
-
-    return `
-      <tr class="municipality-row" data-codigo="${escapeHtml(item.codigo_municipio)}" style="cursor: pointer;">
-        <td data-label="Município">${municipioHtml}</td>
-        <td data-label="Risco">${badge(item.nivel_risco)}<br><span class="status-line">score ${fmt.format(item.risk_score || 0)}</span></td>
-        <td data-label="Casos">${fmt.format(item.total_casos_provaveis || 0)}</td>
-        <td data-label="Óbitos">${fmt.format(item.total_obitos || 0)}</td>
-        <td data-label="Doenças altas">${diseaseNames(item.doencas_altas)}</td>
-      </tr>
-    `;
-  }).join('');
-
-  // Make rows clickable for complete visibility per municipality
-  document.querySelectorAll('.municipality-row').forEach(row => {
-    row.addEventListener('click', () => {
-      const codigo = row.dataset.codigo;
-      const fullItem = items.find(i => i.codigo_municipio === codigo);
-      if (fullItem) showMunicipioDetail(fullItem);
-    });
-  });
-}
-
-function renderAlerts(items) {
-  if (!Array.isArray(items) || items.length === 0) {
-    alerts.innerHTML = '<p class="status-line">Nenhum alerta alto encontrado para este filtro. Tente ampliar a consulta ou remover filtros.</p>';
-    return;
-  }
-  alerts.innerHTML = items.map((item) => {
-    const level = levelClass(item.nivel_risco);
-    return `
-      <article class="alert-item ${level}">
-        <header><strong>${escapeHtml(item.municipio)}/${escapeHtml(item.estado)}</strong>${badge(item.nivel_risco)}</header>
-        <p><strong>${escapeHtml(item.doenca)}</strong> · ${escapeHtml(item.virus)} · ${fmt.format(item.casos_provaveis || 0)} casos prováveis</p>
-        <p>Graves ${fmt.format(item.casos_graves || 0)} · Óbitos ${fmt.format(item.obitos || 0)} · Score ${fmt.format(item.risk_score || 0)}</p>
-      </article>
-    `;
-  }).join('');
-}
-
-function setLoading(isLoading) {
-  submitButton.disabled = isLoading;
-  submitButton.textContent = isLoading ? 'Consultando...' : 'Atualizar';
-  form.setAttribute('aria-busy', isLoading ? 'true' : 'false');
-  rows.closest('.table-wrap')?.setAttribute('aria-busy', isLoading ? 'true' : 'false');
-}
-
-function updateQuickFilterState(level) {
-  document.querySelectorAll('[data-quick-level]').forEach((button) => {
-    button.setAttribute('aria-pressed', (button.dataset.quickLevel || '') === (level || '') ? 'true' : 'false');
-  });
-}
-
-// Mostrar visão completa por município + carregar ano anterior automaticamente (decisão de alto valor)
-async function showMunicipioDetail(item) {
-  const panel = document.getElementById('municipio-detail-panel');
-  if (!panel || !item) return;
-
-  const currentYear = item.periodo?.ano || new Date().getFullYear();
-  const previousYear = currentYear - 1;
-
-  document.getElementById('detail-municipio-title').textContent = `${item.municipio} / ${item.estado}`;
-  document.getElementById('detail-municipio-subtitle').textContent = `Código ${item.codigo_municipio} • Ano atual: ${currentYear} (com comparação automática para ${previousYear})`;
-
-  // Resumo visual mais polido
-  const summaryHtml = `
-    <div class="stat-item">
-      <span class="stat-label">Casos Prováveis</span>
-      <strong style="font-size:1.35rem; display:block; margin-top:2px;">${fmt.format(item.total_casos_provaveis || 0)}</strong>
-    </div>
-    <div class="stat-item">
-      <span class="stat-label">Óbitos Totais</span>
-      <strong style="font-size:1.35rem; display:block; margin-top:2px; color:#b91c1c;">${fmt.format(item.total_obitos || 0)}</strong>
-    </div>
-    <div class="stat-item">
-      <span class="stat-label">Hospitalizações</span>
-      <strong style="font-size:1.35rem; display:block; margin-top:2px;">${fmt.format(item.total_hospitalizacoes || 0)}</strong>
-    </div>
-    <div class="stat-item">
-      <span class="stat-label">Nível de Risco</span>
-      <div style="margin-top:4px;">${badge(item.nivel_risco)}</div>
-    </div>
-  `;
-  document.getElementById('detail-summary').innerHTML = summaryHtml;
-
-  // Tabela de todas as doenças
-  const tbody = document.getElementById('detail-diseases-body');
-  const doencas = item.doencas || [];
-  tbody.innerHTML = doencas.map(d => `
-    <tr>
-      <td>
-        <div style="font-weight:600; color:#111827;">${escapeHtml(d.nome)}</div>
-        <div style="font-size:0.78rem; color:#6b7280; margin-top:1px;">${escapeHtml(d.virus || '')}</div>
-      </td>
-      <td class="num">${fmt.format(d.casos_provaveis || 0)}</td>
-      <td class="num">${fmt.format(d.sinais_alarme || 0)}</td>
-      <td class="num">${fmt.format(d.casos_graves || 0)}</td>
-      <td class="num">${fmt.format(d.hospitalizacoes || 0)}</td>
-      <td class="num" style="font-weight:600;">${fmt.format(d.obitos || 0)}</td>
-      <td class="num" style="font-weight:600;">${fmt.format(d.risk_score || 0)}</td>
-      <td>${badge(d.nivel_risco)}</td>
-    </tr>
-  `).join('');
-
-  panel.style.display = 'block';
-  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-  // === Decisão não recomendada de alto valor: carregar ano anterior automaticamente ===
-  document.getElementById('detail-comparison').innerHTML = `
-    <div style="padding: 14px; background: #f8fafc; border-radius: 10px; border: 1px solid #e2e8f0; font-size: 0.9rem; color: #64748b;">
-      Carregando automaticamente os dados de <strong>${previousYear}</strong> para comparação ano a ano...
-    </div>
-  `;
-
-  try {
-    const prevParams = new URLSearchParams({
-      municipio: item.codigo_municipio,
-      ano: previousYear,
-      limite: '30'
-    });
-
-    const prevRes = await fetch(`/v1/risk-index?${prevParams.toString()}`);
-    if (prevRes.ok) {
-      const prevData = await prevRes.json();
-      const prevItem = Array.isArray(prevData) ? prevData.find(m => m.codigo_municipio === item.codigo_municipio) : null;
-
-      if (prevItem) {
-        renderSimpleYearComparison(item, prevItem, currentYear, previousYear);
-      } else {
-        document.getElementById('detail-comparison').innerHTML = 
-          `<p class="detail-placeholder">Não foram encontrados dados para ${previousYear} neste município.</p>`;
-      }
-    }
-  } catch (e) {
-    document.getElementById('detail-comparison').innerHTML = 
-      `<p class="detail-placeholder">Não foi possível carregar os dados de ${previousYear}.</p>`;
-  }
-}
-
-function renderSimpleYearComparison(current, previous, currentYear, previousYear) {
-  const container = document.getElementById('detail-comparison');
-  if (!container) return;
-
-  const currScore = current.risk_score || 0;
-  const prevScore = previous.risk_score || 0;
-  const scoreDiff = currScore - prevScore;
-  const scorePct = prevScore > 0 ? ((scoreDiff / prevScore) * 100) : 0;
-
-  const currObitos = current.total_obitos || 0;
-  const prevObitos = previous.total_obitos || 0;
-  const obitosDiff = currObitos - prevObitos;
-
-  const currCasos = current.total_casos_provaveis || 0;
-  const prevCasos = previous.total_casos_provaveis || 0;
-  const casosDiff = currCasos - prevCasos;
-  const casosPct = prevCasos > 0 ? ((casosDiff / prevCasos) * 100) : 0;
-
-  const getColor = (diff) => diff > 0 ? '#b91c1c' : (diff < 0 ? '#15803d' : '#64748b');
-  const getArrow = (diff) => diff > 0 ? '▲' : (diff < 0 ? '▼' : '→');
-  const getVerb = (diff) => diff > 0 ? 'piorou' : (diff < 0 ? 'melhorou' : 'manteve-se estável');
-
-  const scoreColor = getColor(scoreDiff);
-  const obitosColor = getColor(obitosDiff);
-  const casosColor = getColor(casosDiff);
-
-  container.innerHTML = `
-    <div style="margin-bottom: 12px; font-size: 0.9rem; color: #475569;">
-      O risco <strong style="color: ${scoreColor};">${getVerb(scoreDiff)}</strong> 
-      ${scoreDiff !== 0 ? `em <strong>${Math.abs(scorePct).toFixed(1)}%</strong>` : ''} 
-      em relação a ${previousYear}.
-    </div>
-
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-      <!-- Ano Anterior -->
-      <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px;">
-        <div style="font-size: 0.7rem; color: #64748b; margin-bottom: 4px;">${previousYear}</div>
-        <div style="font-size: 1.1rem; font-weight: 700; color: #334155;">Score: ${fmt.format(prevScore)}</div>
-        <div style="font-size: 0.85rem; color: #64748b; margin-top: 4px;">
-          ${fmt.format(prevCasos)} casos • ${fmt.format(prevObitos)} óbitos
-        </div>
-      </div>
-
-      <!-- Ano Atual -->
-      <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px;">
-        <div style="font-size: 0.7rem; color: #64748b; margin-bottom: 4px;">${currentYear}</div>
-        <div style="font-size: 1.1rem; font-weight: 700; color: ${scoreColor};">
-          Score: ${fmt.format(currScore)} 
-          <span style="font-size: 0.9rem;">${getArrow(scoreDiff)}</span>
-        </div>
-        <div style="font-size: 0.85rem; color: #64748b; margin-top: 4px;">
-          ${fmt.format(currCasos)} casos 
-          <span style="color: ${casosColor};">(${getArrow(casosDiff)} ${Math.abs(casosPct).toFixed(0)}%)</span> 
-          • ${fmt.format(currObitos)} óbitos 
-          <span style="color: ${obitosColor};">(${getArrow(obitosDiff)})</span>
-        </div>
-      </div>
-    </div>
-
-    <div style="margin-top: 10px; font-size: 0.8rem; color: #64748b;">
-      Diferença no score: <strong style="color: ${scoreColor};">${scoreDiff > 0 ? '+' : ''}${scoreDiff.toFixed(1)}</strong>
-    </div>
-  `;
-}
-
-// Fechar painel de detalhe
-function closeDetailPanel() {
-  const panel = document.getElementById('municipio-detail-panel');
-  if (panel) panel.style.display = 'none';
-}
-
-document.addEventListener('click', function(e) {
-  if (e.target.id === 'close-detail') {
-    closeDetailPanel();
-  }
-});
-
-// Fechar com ESC (melhor UX)
-document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') {
-    const panel = document.getElementById('municipio-detail-panel');
-    if (panel && panel.style.display !== 'none') {
-      closeDetailPanel();
-    }
-  }
-});
-
-// Fechar ao clicar fora do painel (melhor UX)
-document.addEventListener('click', function(e) {
-  const panel = document.getElementById('municipio-detail-panel');
-  if (!panel || panel.style.display === 'none') return;
-
-  // Fecha se clicar fora do painel e não for em uma linha da tabela
-  if (!panel.contains(e.target) && !e.target.closest('.municipality-row')) {
-    closeDetailPanel();
-  }
-});
-
-function renderSkeleton() {
-  rows.innerHTML = Array.from({ length: 4 }, () => `
-    <tr aria-hidden="true">
-      <td class="empty-cell" colspan="5"><span class="skeleton-line"></span><span class="skeleton-line short" style="margin-top: 10px;"></span></td>
-    </tr>
-  `).join('');
-  alerts.innerHTML = '<article class="alert-item" aria-hidden="true"><span class="skeleton-line"></span><span class="skeleton-line short" style="margin-top: 10px;"></span></article>';
-}
-
-async function loadDashboard(event) {
-  if (event) event.preventDefault();
-  ufInput.value = ufInput.value.toUpperCase().trim();
-  const data = new FormData(form);
-  const params = new URLSearchParams();
-  for (const [key, value] of data.entries()) {
-    if (value && key !== 'somente_altos') params.set(key, String(value).trim());
-  }
-  params.set('somente_altos', document.getElementById('somente_altos').checked ? 'true' : 'false');
-  params.set('limite', '25');
-
-  statusLine.textContent = 'Atualizando dados...';
-  setLoading(true);
-  renderSkeleton();
-  try {
-    const riskResponse = await fetch(`/v1/risk-index?${params.toString()}`);
-    const alertParams = new URLSearchParams();
-    if (params.get('municipio')) alertParams.set('municipio', params.get('municipio'));
-    if (params.get('estado')) alertParams.set('estado', params.get('estado'));
-    alertParams.set('limite', '10');
-    const alertResponse = await fetch(`/v1/high-alerts?${alertParams.toString()}`);
-    if (!riskResponse.ok || !alertResponse.ok) throw new Error('Falha na consulta');
-    const riskPayload = await riskResponse.json();
-    const alertPayload = await alertResponse.json();
-    renderRows(Array.isArray(riskPayload) ? riskPayload : []);
-    renderAlerts(alertPayload.alerts || []);
-    updateQuickFilterState(params.get('nivel_minimo') || '');
-    statusLine.textContent = Array.isArray(riskPayload) ? `${riskPayload.length} município(s) retornado(s).` : (riskPayload.message || 'Consulta concluída.');
-  } catch (error) {
-    renderRows([]);
-    renderAlerts([]);
-    statusLine.textContent = 'Não foi possível atualizar os dados agora. Tente novamente em alguns instantes.';
-  } finally {
-    setLoading(false);
-  }
-}
-
-ufInput.addEventListener('input', () => { ufInput.value = ufInput.value.toUpperCase(); });
-form.addEventListener('reset', () => {
-  window.setTimeout(() => {
-    document.getElementById('municipio').value = '';
-    ufInput.value = '';
-    document.getElementById('nivel_minimo').value = '';
-    document.getElementById('somente_altos').checked = false;
-    loadDashboard();
-  });
-});
-document.querySelectorAll('[data-quick-level]').forEach((button) => {
-  button.addEventListener('click', () => {
-    document.getElementById('nivel_minimo').value = button.dataset.quickLevel || '';
-    document.getElementById('somente_altos').checked = ['alto', 'critico'].includes(button.dataset.quickLevel || '');
-    updateQuickFilterState(button.dataset.quickLevel || '');
-    loadDashboard();
-  });
-});
-form.addEventListener('submit', loadDashboard);
-"""
 
 
 def dashboard_summary() -> dict[str, int]:
@@ -2140,32 +1032,58 @@ def dashboard_summary() -> dict[str, int]:
 
 
 def render_dashboard_rows(rows: Iterable[Mapping[str, Any]]) -> str:
+    """Quatro colunas. A coluna com nomes de doenças virou tira de agravos:
+    mesma informação em menos pixels, mais a idade da fonte que faltava."""
+    year = signal_reference_date().year
     rendered = []
     for row in rows:
-        municipio_nome = escape_html(row.get("municipio"))
+        nome = escape_html(row.get("municipio"))
         estado = escape_html(row.get("estado"))
         codigo = escape_html(row.get("codigo_municipio"))
 
-        # Suporte a bairro: mostra origem da consulta quando disponível
-        filtro = row.get("filtro_localidade")
-        if filtro and filtro.get("tipo") == "distrito":
-            localidade_original = escape_html(filtro.get("localidade", ""))
-            municipio_display = f'<strong>{municipio_nome}</strong><br><span class="status-line">Busca por: {localidade_original} → {estado} · {codigo}</span>'
+        filtro = row.get("filtro_localidade") or {}
+        if filtro.get("tipo") in {"distrito", "bairro"}:
+            origem = escape_html(filtro.get("localidade", ""))
+            sub = f"{origem} &rarr; {estado} &middot; {codigo}"
         else:
-            municipio_display = f'<strong>{municipio_nome}</strong><br><span class="status-line">{estado} · {codigo}</span>'
+            sub = f"{estado} &middot; {codigo}"
+
+        altas = [clean_value(item.get("nome")) for item in row.get("doencas_altas", [])]
+        if altas:
+            resumo = ", ".join(escape_html(x) for x in altas[:2])
+            if len(altas) > 2:
+                resumo += f" +{len(altas) - 2}"
+        else:
+            resumo = "sem agravo em nível alto"
+
+        obitos = int(row.get("total_obitos") or 0)
+        obitos_html = (
+            f'<span class="cell-deaths">{format_number(obitos)} óbito(s)</span>'
+            if obitos
+            else '<span class="cell-muted">sem óbitos</span>'
+        )
+
+        strip = render_signal_strip(
+            sort_diseases_for_strip(row.get("doencas") or []), year
+        )
 
         rendered.append(
-            "<tr>"
-            f'<td data-label="Município">{municipio_display}</td>'
-            f'<td data-label="Risco">{render_badge(row.get("nivel_risco"))}<br><span class="status-line">score {format_number(row.get("risk_score"))}</span></td>'
-            f'<td data-label="Casos">{format_number(row.get("total_casos_provaveis"))}</td>'
-            f'<td data-label="Óbitos">{format_number(row.get("total_obitos"))}</td>'
-            f'<td data-label="Doenças altas">{escape_html(", ".join(clean_value(item.get("nome")) for item in row.get("doencas_altas", [])) or "Sem alerta alto")}</td>'
+            '<tr class="municipality-row" tabindex="0" role="button" '
+            f'data-codigo="{codigo}" aria-label="Abrir visão completa de {nome}">'
+            f'<td data-label="Município"><strong>{nome}</strong>'
+            f'<span class="cell-sub">{sub}</span>'
+            f'<span class="cell-sub">{resumo}</span></td>'
+            f'<td data-label="Risco">{render_badge(row.get("nivel_risco"))}'
+            f'<span class="cell-sub">{render_signal_tag(row.get("recencia"))}</span></td>'
+            f'<td data-label="Casos" class="num"><strong>{format_number(row.get("total_casos_provaveis"))}</strong>'
+            f'<span class="cell-sub">{obitos_html}</span></td>'
+            f'<td data-label="Agravos">{strip}</td>'
             "</tr>"
         )
     return (
         "".join(rendered)
-        or '<tr><td class="empty-cell" colspan="5"><strong>Dados ainda não carregados.</strong>Recarregue a consulta ou verifique as fontes disponíveis.</td></tr>'
+        or '<tr><td class="empty-cell" colspan="4"><strong>Nenhum município encontrado.</strong>'
+           'Remova a UF, amplie o nível mínimo ou busque pelo código IBGE.</td></tr>'
     )
 
 
@@ -2481,6 +1399,31 @@ def escape_html(value: Any) -> str:
 TIER_ANONYMOUS = "anonymous"
 
 
+TIER_MAX_LIMIT = {"anonymous": 5, "free": 20}
+
+
+def tier_limit(user: Mapping[str, Any], requested: int) -> int:
+    """Teto de resultados por tier. Antes estava duplicado em cada endpoint."""
+    ceiling = TIER_MAX_LIMIT.get(str(user.get("tier")))
+    return min(requested, ceiling) if ceiling else requested
+
+
+def declare_result_counts(
+    response: Response | None, *, total: int, returned: int, limit: int
+) -> None:
+    """Publica o corte em headers.
+
+    Sem isto, um cliente que pede 25 e recebe 5 não tem como distinguir
+    "só existem 5" de "você foi truncado" — e o painel afirmava a primeira
+    leitura enquanto a segunda era a verdadeira.
+    """
+    if response is None:
+        return
+    response.headers["X-Total-Results"] = str(total)
+    response.headers["X-Returned-Results"] = str(returned)
+    response.headers["X-Limit-Applied"] = str(limit)
+
+
 async def get_api_user(x_api_key: str | None = Header(None)):
     tier_info = {"tier": TIER_ANONYMOUS, "rate_limit": 10}
     request_key = TIER_ANONYMOUS
@@ -2685,20 +1628,18 @@ async def get_risk_index(
         default=None, description="baixo, moderado, alto ou critico."
     ),
     limite: int = Query(default=100, ge=1, le=1000),
+    response: Response = None,  # type: ignore[assignment]
     user: dict = Depends(get_api_user),
 ):
-    # Enforce limits for anonymous/free users
-    if user["tier"] == "anonymous" and limite > 5:
-        limite = 5
-    elif user["tier"] == "free" and limite > 20:
-        limite = 20
+    limite = tier_limit(user, limite)
 
-    # Support loading specific year for comparison (non-recommended high-value path)
     effective_year = ano if ano is not None else DEFAULT_YEAR
 
     if effective_year != DEFAULT_YEAR:
-        # Load specific year on demand (for detail view comparison)
-        year_report = fetch_epidemiology_report(effective_year)
+        # Carga de outro ano sob demanda. Vai para a threadpool: a versão
+        # anterior fazia download síncrono dentro de um `async def`, travando
+        # o event loop a cada clique numa linha do painel.
+        year_report = await run_in_threadpool(fetch_epidemiology_report, effective_year)
         year_rows = year_report.get("municipios", [])
     else:
         year_rows = db_clini
@@ -2710,9 +1651,11 @@ async def get_risk_index(
         somente_altos=somente_altos,
         nivel_minimo=nivel_minimo,
     )
-    return (
-        rows[:limite] if rows else {"message": "Dados não disponíveis para o filtro."}
-    )
+    page = rows[:limite] if rows else []
+    declare_result_counts(response, total=len(rows), returned=len(page), limit=limite)
+    if not rows:
+        return {"message": "Dados não disponíveis para o filtro."}
+    return page
 
 
 @app.get(
@@ -2728,21 +1671,22 @@ async def get_high_alerts(
         default=None, description="Filtra por nome ou código: DENG, CHIK ou ZIKA."
     ),
     limite: int = Query(default=100, ge=1, le=1000),
+    response: Response = None,  # type: ignore[assignment]
     user: dict = Depends(get_api_user),
 ) -> dict[str, Any]:
-    # Enforce limits for anonymous/free users
-    if user["tier"] == "anonymous" and limite > 5:
-        limite = 5
-    elif user["tier"] == "free" and limite > 20:
-        limite = 20
+    limite = tier_limit(user, limite)
 
     alerts = filter_alerts(
         db_alertas, municipio=municipio, estado=estado, doenca=doenca
     )
+    page = alerts[:limite]
+    declare_result_counts(response, total=len(alerts), returned=len(page), limit=limite)
     return {
         "metadata": db_metadata,
         "total": len(alerts),
-        "alerts": alerts[:limite],
+        "retornados": len(page),
+        "limite_aplicado": limite,
+        "alerts": page,
     }
 
 
@@ -2803,7 +1747,15 @@ async def refresh_report(
         default=True,
         description="Quando true, ignora o cache agregado e reprocessa as fontes reais.",
     ),
+    user: dict = Depends(get_api_user),
 ) -> dict[str, Any]:
+    # Único endpoint que reprocessa a carga inteira. Estava aberto: sem chave,
+    # sem rate limit, acionável por qualquer um.
+    if user["tier"] not in {"premium", "admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Recarregar a base exige uma chave de API com permissão de escrita.",
+        )
     await run_in_threadpool(
         load_or_refresh_report, DEFAULT_YEAR, force_refresh=force_refresh
     )

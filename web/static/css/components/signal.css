@@ -1,0 +1,152 @@
+/**
+ * Sinal e Fonte — a dimensão temporal do dado.
+ *
+ * Três fatos distintos, três tratamentos visuais distintos:
+ *   .data-status  barra de estado da CARGA (o serviço buscou dados quando?)
+ *   .signal-strip tira de agravos: um segmento por agravo, cor = idade da FONTE
+ *   .signal-tag   rótulo textual do SINAL dentro da fonte
+ *
+ * A tira é SVG inline renderizado no servidor: zero JS, zero request extra,
+ * legível em 360px e presente mesmo com JS desligado.
+ */
+
+/* Tokens de temporalidade. Deliberadamente fora da escala de risco:
+   "quão atual é o dado" não é "quão grave é a situação". */
+:root {
+  --fonte-atual: var(--green);
+  --fonte-1ano: var(--amber);
+  --fonte-antiga: #8a6d3b;
+  --fonte-ausente: #b8c4bd;
+
+  --sinal-vivo: var(--green);
+  --sinal-esfriando: var(--teal);
+  --sinal-dormente: var(--amber);
+  --sinal-fossil: var(--red);
+  --sinal-desconhecido: var(--muted);
+}
+
+/* ---------- Barra de estado da carga ---------- */
+
+.data-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 0 0 20px;
+  padding: 11px 16px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--green);
+  border-radius: 10px;
+  background: var(--panel);
+  font-size: .84rem;
+  line-height: 1.4;
+}
+
+.data-status.is-stale {
+  border-left-color: var(--amber);
+  background: #fffaf0;
+}
+
+.data-status b {
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+
+.data-status .status-sep {
+  color: var(--line);
+}
+
+.data-status .status-warn {
+  color: var(--amber);
+  font-weight: 700;
+}
+
+/* ---------- Tira de agravos ---------- */
+
+.signal-strip {
+  display: block;
+  width: 100%;
+  max-width: 168px;
+  height: 22px;
+}
+
+.signal-strip rect {
+  shape-rendering: crispEdges;
+}
+
+.strip-caption {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: .72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.strip-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: .74rem;
+}
+
+.strip-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.strip-legend i {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+}
+
+/* ---------- Rótulo de sinal ---------- */
+
+.signal-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: .76rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.signal-tag::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.signal-tag.vivo { color: var(--sinal-vivo); }
+.signal-tag.esfriando { color: var(--sinal-esfriando); }
+.signal-tag.dormente { color: var(--sinal-dormente); }
+.signal-tag.fossil { color: var(--sinal-fossil); }
+.signal-tag.desconhecido { color: var(--sinal-desconhecido); }
+
+/* Ano da fonte: sempre visível junto do sinal, nunca em rodapé. */
+.source-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.source-tag.is-old {
+  background: #fdf3e3;
+  color: var(--fonte-antiga);
+}
+
+@media (max-width: 640px) {
+  .signal-strip { max-width: 100%; }
+  .data-status { font-size: .8rem; }
+}
