@@ -12,6 +12,7 @@ import unittest
 
 from presentation.signal import (
     render_data_status,
+    render_incidence_cell,
     render_risk_cell,
     render_signal_strip,
     render_signal_tag,
@@ -204,6 +205,56 @@ class TestRenderRiskCell(unittest.TestCase):
     def test_includes_the_signal_tag(self) -> None:
         html = render_risk_cell(self._row(), lambda level: f"[{level}]")
         self.assertIn("signal-tag", html)
+
+
+class TestRenderIncidenceCell(unittest.TestCase):
+    """A taxa passa a ser o numero principal da coluna numerica.
+
+    Medido: `risk_score` correlaciona 0,82 com a populacao. Sao Paulo liderava
+    o painel com 86 casos por 100 mil enquanto Sete Quedas/MS, com 6.612 por
+    100 mil, nao aparecia. A contagem absoluta continua visivel, mas deixa de
+    ser o que decide a ordem de leitura.
+    """
+
+    def _row(self, taxa=6612.0, confiavel=True, casos=750, obitos=0, pop=11343):
+        return {
+            "total_casos_provaveis": casos,
+            "total_obitos": obitos,
+            "incidencia": {
+                "por_100k": taxa,
+                "confiavel": confiavel,
+                "populacao": pop,
+                "ressalva": None if confiavel else "populacao pequena",
+            },
+        }
+
+    def test_rate_is_the_primary_number(self) -> None:
+        html = render_incidence_cell(self._row())
+        self.assertIn("6.612", html)
+        self.assertIn("100 mil", html)
+
+    def test_absolute_count_stays_visible(self) -> None:
+        self.assertIn("750", render_incidence_cell(self._row()))
+
+    def test_deaths_are_shown_when_present(self) -> None:
+        html = render_incidence_cell(self._row(obitos=175))
+        self.assertIn("175", html)
+        self.assertIn("cell-deaths", html)
+
+    def test_unreliable_rate_is_marked_not_hidden(self) -> None:
+        html = render_incidence_cell(self._row(confiavel=False))
+        self.assertIn("6.612", html)
+        self.assertIn("is-unreliable", html)
+
+    def test_missing_rate_degrades_to_the_absolute_count(self) -> None:
+        html = render_incidence_cell(self._row(taxa=None, confiavel=False))
+        self.assertIn("750", html)
+        self.assertIn("sem denominador", html)
+
+    def test_row_without_incidence_block_does_not_break(self) -> None:
+        html = render_incidence_cell({"total_casos_provaveis": 12})
+        self.assertIn("12", html)
+
 
 if __name__ == "__main__":
     unittest.main()

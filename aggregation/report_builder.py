@@ -14,7 +14,6 @@ from datetime import datetime
 from typing import Any, Iterable, Mapping
 
 from domain.disease_sources import DISEASE_SOURCES, classification_label
-from domain.rates import incidence_per_100k
 from domain.risk import (
     RISK_FORMULA,
     finalize_disease_summary,
@@ -61,18 +60,11 @@ def create_municipality_summary(
     if not state:
         state = _state_from_record(record)
 
-    # populacao is optional — read it from the lookup item when present.
-    # The value may be an int (preferred) or absent; default to None for
-    # graceful degradation in rate calculations downstream.
-    raw_populacao = lookup_item.get("populacao") if lookup_item else None
-    populacao: int | None = int(raw_populacao) if raw_populacao is not None else None
-
     return {
         "codigo_municipio": municipality_code,
         "municipio": clean_value(lookup_item.get("municipio") if lookup_item else "")
         or f"Código {municipality_code}",
         "estado": state,
-        "populacao": populacao,
         "periodo": {"ano": year},
         "fonte": "SINAN/OpenDataSUS",
         "formula_risco": RISK_FORMULA,
@@ -209,10 +201,12 @@ def finalize_municipality_rows(
         municipality["nivel_risco"] = worst_level(
             disease["nivel_risco"] for disease in diseases
         )
-        municipality["taxa_incidencia_100k"] = incidence_per_100k(
-            municipality["total_casos_provaveis"],
-            municipality.get("populacao"),
-        )
+        # População e taxa de incidência NÃO nascem aqui. O lookup do IBGE
+        # nunca trouxe denominador, então este cálculo produzia None em 100%
+        # dos casos. A autoridade única passa a ser
+        # `aggregation/population_enrichment.py`, aplicada na entrada do
+        # relatório em memória — o que faz o denominador valer também para o
+        # cache em disco e o snapshot embarcado.
         rows.append(municipality)
 
     return sorted(rows, key=lambda item: item["risk_score"], reverse=True)

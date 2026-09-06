@@ -144,140 +144,95 @@ class TestIncidencePer100k(unittest.TestCase):
                     # Must not raise
                     fn(cases, pop)
 
+class TestIncidenceIntegration(unittest.TestCase):
+    """Integração da taxa com a autoridade que de fato a produz.
 
-class TestIncidencePer100kIntegrationWithReportBuilder(unittest.TestCase):
+    As classes que existiam aqui verificavam que `create_municipality_summary`
+    guardava `populacao` vinda de `lookup_item` e que
+    `finalize_municipality_rows` gravava `taxa_incidencia_100k`. Esse caminho
+    passava nos testes e nunca funcionou em produção: o lookup do IBGE
+    (`ingestion/municipality_lookup.py`) monta apenas
+    `{municipio, estado, codigo_ibge}`, então `populacao` era sempre None e a
+    taxa era sempre None — medido: 0 de 5.339 municípios no relatório real.
+
+    O denominador passou a ser responsabilidade de
+    `aggregation/population_enrichment.py`, aplicado na entrada do relatório
+    em memória, o que faz valer também para o cache em disco e o snapshot
+    embarcado. Estes testes acompanham a mudança de autoridade.
     """
-    Integration tests: municipality summaries carry taxa_incidencia_100k
-    after finalize_municipality_rows is called.
-    """
 
-    def _build_municipality(self, populacao: int | None) -> dict:
-        """Helper: build a minimal municipality dict as create_municipality_summary would."""
-        from aggregation.report_builder import create_municipality_summary
-        lookup_item = {"municipio": "TestCity", "estado": "SP"}
-        if populacao is not None:
-            lookup_item["populacao"] = populacao  # type: ignore[assignment]
-        record = {"ID_MN_RESI": "999999", "SG_UF": "35"}
-        return create_municipality_summary("999999", record, 2025, lookup_item)
+    POPULATIONS = {"355030": 11_911_337, "520870": 1_536_097, "999999": 800}
 
-    def test_municipality_summary_stores_populacao_from_lookup(self):
-        """create_municipality_summary must store populacao when present in lookup."""
-        mun = self._build_municipality(populacao=500_000)
-        self.assertEqual(mun["populacao"], 500_000)
-
-    def test_municipality_summary_populacao_is_none_when_absent(self):
-        """create_municipality_summary must store None when lookup has no populacao."""
-        mun = self._build_municipality(populacao=None)
-        self.assertIn("populacao", mun)
-        self.assertIsNone(mun["populacao"])
-
-    def _finalize_with_disease(
-        self,
-        populacao: int | None,
-        casos_provaveis: int = 10,
-    ) -> dict:
-        """Helper: run a minimal finalize_municipality_rows cycle."""
-        from aggregation.report_builder import finalize_municipality_rows
-        municipality = self._build_municipality(populacao=populacao)
-        # Inject a fake disease with the given case count
-        municipality["doencas_por_codigo"] = {
-            "DENG": {
-                "codigo": "DENG",
-                "nome": "Dengue",
-                "virus": "DENV",
-                "tipo": "Arbovirose urbana",
-                "perfil_risco": "arbovirus",
-                "formula_risco": "casos_provaveis + 4*sinais_alarme",
-                "periodo": {"ano": 2025},
-                "total_notificacoes": casos_provaveis,
-                "casos_provaveis": casos_provaveis,
-                "casos_descartados": 0,
-                "sinais_alarme": 0,
-                "casos_graves": 0,
-                "hospitalizacoes": 0,
-                "obitos": 0,
-                "risk_score": 0.0,
-                "nivel_risco": "baixo",
-                "ultima_notificacao": None,
-                "ultimo_inicio_sintomas": None,
-                "classificacoes": {},
-            }
+    def _report(self, codigo="355030", casos=10_225):
+        return {
+            "municipios": [
+                {
+                    "codigo_municipio": codigo,
+                    "municipio": "TestCity",
+                    "estado": "SP",
+                    "total_casos_provaveis": casos,
+                    "total_obitos": 0,
+                    "risk_score": 1.0,
+                    "nivel_risco": "baixo",
+                    "doencas": [],
+                    "doencas_altas": [],
+                }
+            ],
+            "metadata": {},
         }
-        rows = finalize_municipality_rows([municipality])
-        return rows[0]
 
-    def test_taxa_incidencia_present_when_populacao_known(self):
-        """finalize_municipality_rows adds taxa_incidencia_100k when population is known."""
-        row = self._finalize_with_disease(populacao=200_000, casos_provaveis=10)
-        self.assertIn("taxa_incidencia_100k", row)
-        expected = round(10 / 200_000 * 100_000, 2)
-        self.assertEqual(row["taxa_incidencia_100k"], expected)
+    def _enrich(self, **kwargs):
+        from aggregation.population_enrichment import enrich_with_population
 
-    def test_taxa_incidencia_is_none_when_populacao_unknown(self):
-        """finalize_municipality_rows sets taxa_incidencia_100k=None when population is missing."""
-        row = self._finalize_with_disease(populacao=None, casos_provaveis=10)
-        self.assertIn("taxa_incidencia_100k", row)
-        self.assertIsNone(row["taxa_incidencia_100k"])
+        return enrich_with_population(self._report(**kwargs), self.POPULATIONS)[
+            "municipios"
+        ][0]
 
-    def test_existing_fields_unchanged_after_adding_taxa(self):
-        """Adding taxa_incidencia_100k must not alter any previously existing fields."""
-        row = self._finalize_with_disease(populacao=500_000, casos_provaveis=5)
-        # Check several pre-existing required fields
-        self.assertIn("codigo_municipio", row)
-        self.assertIn("municipio", row)
-        self.assertIn("estado", row)
-        self.assertIn("periodo", row)
-        self.assertIn("total_casos_provaveis", row)
-        self.assertIn("total_obitos", row)
-        self.assertIn("risk_score", row)
-        self.assertIn("nivel_risco", row)
-        self.assertIn("doencas", row)
-        self.assertIn("doencas_altas", row)
-        self.assertEqual(row["total_casos_provaveis"], 5)
+    def test_population_reaches_the_municipality(self):
+        self.assertEqual(self._enrich()["populacao"], 11_911_337)
 
-    def test_taxa_zero_when_cases_zero_and_population_known(self):
-        """0 cases with known population yields 0.0 rate (not None)."""
-        row = self._finalize_with_disease(populacao=100_000, casos_provaveis=0)
-        self.assertEqual(row["taxa_incidencia_100k"], 0.0)
+    def test_rate_is_computed_when_population_is_known(self):
+        self.assertAlmostEqual(self._enrich()["incidencia"]["por_100k"], 85.84, places=1)
 
+    def test_rate_is_none_when_population_is_unknown(self):
+        row = self._enrich(codigo="111111")
+        self.assertIsNone(row["populacao"])
+        self.assertIsNone(row["incidencia"]["por_100k"])
+        self.assertIn("sem população", row["incidencia"]["ressalva"])
 
-class TestMunicipalityLookupPopulacao(unittest.TestCase):
-    """
-    Tests that the municipality lookup layer correctly propagates
-    the optional 'populacao' field from lookup items.
-    """
+    def test_zero_cases_with_known_population_is_zero_not_none(self):
+        row = self._enrich(casos=0)
+        self.assertEqual(row["incidencia"]["por_100k"], 0.0)
 
-    def test_lookup_item_with_populacao_is_accepted(self):
-        """A lookup dict containing 'populacao' is a valid item."""
-        lookup_item: dict = {
-            "municipio": "Curitiba",
-            "estado": "PR",
-            "codigo_ibge": "4106902",
-            "populacao": 1_948_626,
-        }
-        # The lookup item is just a plain dict — verify it carries the field
-        self.assertEqual(lookup_item["populacao"], 1_948_626)
+    def test_existing_fields_are_untouched(self):
+        row = self._enrich()
+        for field in (
+            "codigo_municipio",
+            "municipio",
+            "estado",
+            "total_casos_provaveis",
+            "total_obitos",
+            "risk_score",
+            "nivel_risco",
+            "doencas",
+            "doencas_altas",
+        ):
+            self.assertIn(field, row)
+        self.assertEqual(row["total_casos_provaveis"], 10_225)
 
-    def test_lookup_item_without_populacao_defaults_to_none_in_summary(self):
-        """When lookup item has no 'populacao', municipality summary must have None."""
+    def test_small_municipality_rate_is_flagged(self):
+        row = self._enrich(codigo="999999", casos=1)
+        self.assertIsNotNone(row["incidencia"]["por_100k"])
+        self.assertFalse(row["incidencia"]["confiavel"])
+
+    def test_report_builder_no_longer_claims_population(self):
+        """A autoridade saiu de lá; nada deve fingir que ainda está."""
         from aggregation.report_builder import create_municipality_summary
-        lookup_item = {"municipio": "Curitiba", "estado": "PR"}
-        record = {"ID_MN_RESI": "410690"}
-        summary = create_municipality_summary("410690", record, 2024, lookup_item)
-        self.assertIn("populacao", summary)
-        self.assertIsNone(summary["populacao"])
 
-    def test_lookup_item_with_populacao_propagates_to_summary(self):
-        """When lookup item has 'populacao', municipality summary must carry it."""
-        from aggregation.report_builder import create_municipality_summary
-        lookup_item = {
-            "municipio": "Curitiba",
-            "estado": "PR",
-            "populacao": 1_948_626,
-        }
-        record = {"ID_MN_RESI": "410690"}
-        summary = create_municipality_summary("410690", record, 2024, lookup_item)
-        self.assertEqual(summary["populacao"], 1_948_626)
+        summary = create_municipality_summary(
+            "999999", {"ID_MN_RESI": "999999"}, 2025, {"municipio": "X", "estado": "SP"}
+        )
+        self.assertNotIn("populacao", summary)
 
 
 if __name__ == "__main__":

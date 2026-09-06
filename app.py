@@ -58,8 +58,12 @@ from aggregation.utils import normalize_text
 # Ingestion layer extraction in progress (Fase 0).
 from ingestion.municipality_lookup import load_municipality_lookup
 from aggregation.recency_enrichment import enrich_report
+from aggregation.population_enrichment import enrich_with_population
+from aggregation.ordering import ORDERINGS, sort_municipalities
+from ingestion.population_lookup import load_population_lookup
 from presentation.signal import (
     render_data_status,
+    render_incidence_cell,
     render_risk_cell,
     render_signal_strip,
     render_signal_tag,
@@ -371,6 +375,25 @@ def public_report_cache_path(path: Path) -> str:
         return path.name
 
 
+_POPULATION_CACHE: dict[str, int] | None = None
+
+
+def cached_population_lookup() -> dict[str, int]:
+    """População do IBGE, buscada uma vez por processo.
+
+    Falha em silêncio de propósito: sem denominador, a interface publica a
+    taxa como indisponível — o que é honesto — em vez de derrubar a carga.
+    """
+    global _POPULATION_CACHE
+    if _POPULATION_CACHE is None:
+        try:
+            _POPULATION_CACHE = load_population_lookup()
+        except Exception as error:  # pragma: no cover - defensivo
+            logger.warning("População indisponível: %s", error)
+            _POPULATION_CACHE = {}
+    return _POPULATION_CACHE
+
+
 def signal_reference_date() -> date:
     """Data contra a qual a idade dos sinais é medida.
 
@@ -412,10 +435,12 @@ def apply_report_state(
         key: value for key, value in cache_metadata.items() if value is not None
     }
 
-    # A recência do sinal é aplicada aqui, no ponto onde as três origens de
-    # dado (carga nova, cache em disco, snapshot embarcado) convergem. Assim
-    # nenhum consumidor recebe um alerta sem saber a idade dele.
+    # Recência e denominador populacional são aplicados aqui, no ponto onde
+    # as três origens de dado (carga nova, cache em disco, snapshot embarcado)
+    # convergem. Assim nenhum consumidor recebe um alerta sem saber a idade
+    # dele, nem um número absoluto sem saber sobre quantos habitantes.
     enriched = enrich_report({**report, "metadata": metadata}, signal_reference_date())
+    enriched = enrich_with_population(enriched, cached_population_lookup())
 
     db_clini = list(enriched.get("municipios") or [])
     db_alertas = list(enriched.get("alertas_altos") or [])
@@ -737,6 +762,14 @@ def render_dashboard_page(request: Request) -> str:
           <option value="critico">Apenas crítico</option>
         </select>
       </label>
+      <label>Ordenar por
+        <select id="ordenar" name="ordenar">
+          <option value="taxa">Incidência por 100 mil</option>
+          <option value="score">Score de risco</option>
+          <option value="casos">Casos absolutos</option>
+          <option value="obitos">Óbitos</option>
+        </select>
+      </label>
       <div class="toolbar-actions">
         <button class="button ghost" type="reset">Limpar</button>
         <button class="button primary" type="submit">Consultar</button>
@@ -747,14 +780,14 @@ def render_dashboard_page(request: Request) -> str:
       <div class="section-head">
         <div>
           <h2 id="municipios-title">Municípios</h2>
-          <p id="dashboard-status" class="status-line" role="status" aria-live="polite">Ano-base {escape_html(period_year)}. Selecione uma linha para a visão completa por agravo.</p>
+          <p id="dashboard-status" class="status-line" role="status" aria-live="polite">Ordenado por incidência por 100 mil habitantes. Selecione uma linha para a visão completa por agravo.</p>
         </div>
         <a class="button" href="/sobre">Metodologia</a>
       </div>
       <div class="table-wrap">
         <table aria-describedby="dashboard-status">
-          <thead><tr><th>Município</th><th>Risco</th><th class="num">Casos</th><th>Agravos por idade da fonte</th></tr></thead>
-          <tbody id="risk-rows">{render_dashboard_rows(db_clini[:8])}</tbody>
+          <thead><tr><th>Município</th><th>Risco</th><th class="num">Incidência</th><th>Agravos por idade da fonte</th></tr></thead>
+          <tbody id="risk-rows">{render_dashboard_rows(sort_municipalities(db_clini, "taxa")[:8])}</tbody>
         </table>
       </div>
       {render_strip_legend()}
@@ -1064,13 +1097,6 @@ def render_dashboard_rows(rows: Iterable[Mapping[str, Any]]) -> str:
         else:
             resumo = "sem agravo em nível alto"
 
-        obitos = int(row.get("total_obitos") or 0)
-        obitos_html = (
-            f'<span class="cell-deaths">{format_number(obitos)} óbito(s)</span>'
-            if obitos
-            else '<span class="cell-muted">sem óbitos</span>'
-        )
-
         strip = render_signal_strip(
             sort_diseases_for_strip(row.get("doencas") or []), year
         )
@@ -1082,8 +1108,7 @@ def render_dashboard_rows(rows: Iterable[Mapping[str, Any]]) -> str:
             f'<span class="cell-sub">{sub}</span>'
             f'<span class="cell-sub">{resumo}</span></td>'
             f'<td data-label="Risco">{render_risk_cell(row, render_badge)}</td>'
-            f'<td data-label="Casos" class="num"><strong>{format_number(row.get("total_casos_provaveis"))}</strong>'
-            f'<span class="cell-sub">{obitos_html}</span></td>'
+            f'<td data-label="Incidência" class="num">{render_incidence_cell(row)}</td>'
             f'<td data-label="Agravos">{strip}</td>'
             "</tr>"
         )
@@ -1295,6 +1320,11 @@ def agent_manifest(request: Request) -> dict[str, Any]:
             "que responde 'exige ação agora?'. No dado atual: 24,3% contra 8,8% de 'crítico'.",
             "`historico_mais_grave` indica que o município já esteve em nível pior por conta de "
             "agravos de fontes antigas. Use para contexto, nunca para priorizar ação de hoje.",
+            "`incidencia.por_100k` é a única medida comparável entre municípios de portes "
+            "diferentes. Use `ordenar=taxa` para priorizar por ela; `ordenar=score` (padrão) "
+            "correlaciona 0,82 com a população e responde 'onde há mais casos', não 'onde é pior'.",
+            "`incidencia.confiavel` é falso quando a população é pequena demais para a taxa ser "
+            "estável. Nesse caso publique o número com a ressalva, nunca sozinho.",
         ],
         "recommended_use": [
             "Use /v1/high-alerts para priorizar municípios com doenças em nível alto ou crítico.",
@@ -1326,8 +1356,10 @@ def agent_manifest(request: Request) -> dict[str, Any]:
                     "estado",
                     "somente_altos",
                     "nivel_minimo",
+                    "ordenar",
                     "limite",
                 ],
+                "ordenacoes": list(ORDERINGS),
             },
             "/v1/metadata": {
                 "method": "GET",
@@ -1727,6 +1759,15 @@ async def get_risk_index(
     nivel_minimo: str | None = Query(
         default=None, description="baixo, moderado, alto ou critico."
     ),
+    ordenar: str = Query(
+        default="score",
+        pattern="^(score|taxa|casos|obitos)$",
+        description=(
+            "Critério de ordenação. `score` soma contagens absolutas e "
+            "correlaciona 0,82 com a população; `taxa` usa incidência por 100 "
+            "mil habitantes e é o que compara municípios de portes diferentes."
+        ),
+    ),
     limite: int = Query(default=100, ge=1, le=1000),
     response: Response = None,  # type: ignore[assignment]
     user: dict = Depends(get_api_user),
@@ -1751,6 +1792,7 @@ async def get_risk_index(
         somente_altos=somente_altos,
         nivel_minimo=nivel_minimo,
     )
+    rows = sort_municipalities(rows, ordenar)
     page = rows[:limite] if rows else []
     declare_result_counts(response, total=len(rows), returned=len(page), limit=limite)
     if not rows:

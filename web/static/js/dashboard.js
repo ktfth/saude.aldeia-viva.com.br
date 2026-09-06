@@ -80,6 +80,35 @@ function badge(value) {
  * Os que saem estavam lá por Meningite de 2022 ou Leptospirose de 2024.
  * Nada some: quando o histórico é pior, a célula diz qual era.
  */
+/**
+ * Coluna numérica: incidência primeiro, contagem absoluta abaixo.
+ *
+ * `risk_score` e a contagem bruta correlacionam 0,82 com a população. São
+ * Paulo encabeçava o painel com 86 por 100 mil enquanto Sete Quedas/MS, com
+ * 6.612 por 100 mil, não aparecia. A taxa é a única medida comparável entre
+ * municípios de portes diferentes.
+ */
+function incidenceCell(item) {
+  const inc = item.incidencia || {};
+  const rate = inc.por_100k;
+  let html;
+  if (rate == null) {
+    html = '<strong class="cell-rate is-unreliable">—</strong>'
+      + '<span class="cell-sub">sem denominador</span>';
+  } else {
+    const cls = inc.confiavel ? 'cell-rate' : 'cell-rate is-unreliable';
+    const title = inc.confiavel ? '' : ` title="${escapeHtml(inc.ressalva || '')}"`;
+    html = `<strong class="${cls}"${title}>${fmt.format(Math.round(rate))}</strong>`
+      + '<span class="cell-sub">por 100 mil hab.</span>';
+  }
+  html += `<span class="cell-sub">${fmt.format(item.total_casos_provaveis || 0)} casos</span>`;
+  const deaths = Number(item.total_obitos || 0);
+  if (deaths) {
+    html += `<span class="cell-sub cell-deaths">${fmt.format(deaths)} óbito(s)</span>`;
+  }
+  return html;
+}
+
 function riskCell(item) {
   const level = item.nivel_risco_fonte_atual || item.nivel_risco;
   let html = badge(level);
@@ -165,11 +194,6 @@ function renderRows(items) {
       ? escapeHtml(altas.slice(0, 2).join(', ')) + (altas.length > 2 ? ` +${altas.length - 2}` : '')
       : 'sem agravo em nível alto';
 
-    const obitos = Number(item.total_obitos || 0);
-    const obitosHtml = obitos
-      ? `<span class="cell-deaths">${fmt.format(obitos)} óbito(s)</span>`
-      : '<span class="cell-muted">sem óbitos</span>';
-
     return `
       <tr class="municipality-row" tabindex="0" role="button"
           data-codigo="${escapeHtml(item.codigo_municipio)}"
@@ -178,8 +202,7 @@ function renderRows(items) {
           <span class="cell-sub">${sub}</span>
           <span class="cell-sub">${resumo}</span></td>
         <td data-label="Risco">${riskCell(item)}</td>
-        <td data-label="Casos" class="num"><strong>${fmt.format(item.total_casos_provaveis || 0)}</strong>
-          <span class="cell-sub">${obitosHtml}</span></td>
+        <td data-label="Incidência" class="num">${incidenceCell(item)}</td>
         <td data-label="Agravos">${signalStrip(item.doencas, year)}</td>
       </tr>`;
   }).join('');
@@ -316,6 +339,7 @@ async function loadDashboard(event) {
   for (const [key, value] of new FormData(form).entries()) {
     if (value) params.set(key, String(value).trim());
   }
+  if (!params.get('ordenar')) params.set('ordenar', 'taxa');
   params.set('limite', '25');
 
   statusLine.textContent = 'Consultando...';

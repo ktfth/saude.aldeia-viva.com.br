@@ -212,3 +212,44 @@ def render_risk_cell(row: Mapping[str, Any], badge_renderer) -> str:
 
     parts.append(f'<span class="cell-sub">{render_signal_tag(row.get("recencia"))}</span>')
     return "".join(parts)
+
+
+def render_incidence_cell(row: Mapping[str, Any]) -> str:
+    """Coluna numérica: incidência primeiro, contagem absoluta abaixo.
+
+    `risk_score` e a contagem bruta correlacionam 0,82 com a população. São
+    Paulo encabeçava o painel com 86 casos por 100 mil enquanto Sete
+    Quedas/MS, com 6.612 por 100 mil — 6,6% da cidade notificada —, não
+    aparecia em lugar algum. A taxa é a única medida comparável entre
+    municípios de portes diferentes, então é ela que ocupa o lugar de honra.
+
+    A contagem absoluta não some: continua logo abaixo, porque é ela que
+    dimensiona a resposta operacional.
+    """
+    incidence = row.get("incidencia") or {}
+    rate = incidence.get("por_100k")
+    reliable = incidence.get("confiavel")
+    parts: list[str] = []
+
+    if rate is None:
+        parts.append('<strong class="cell-rate is-unreliable">—</strong>')
+        parts.append('<span class="cell-sub">sem denominador</span>')
+    else:
+        classes = "cell-rate" if reliable else "cell-rate is-unreliable"
+        title = "" if reliable else f' title="{escape(str(incidence.get("ressalva") or ""))}"'
+        formatted = f"{rate:,.0f}".replace(",", ".")
+        parts.append(f'<strong class="{classes}"{title}>{formatted}</strong>')
+        parts.append('<span class="cell-sub">por 100 mil hab.</span>')
+
+    cases = int(row.get("total_casos_provaveis") or 0)
+    parts.append(
+        f'<span class="cell-sub">{f"{cases:,}".replace(",", ".")} casos</span>'
+    )
+
+    deaths = int(row.get("total_obitos") or 0)
+    if deaths:
+        parts.append(
+            f'<span class="cell-sub cell-deaths">'
+            f'{f"{deaths:,}".replace(",", ".")} óbito(s)</span>'
+        )
+    return "".join(parts)

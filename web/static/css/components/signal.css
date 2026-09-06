@@ -149,6 +149,23 @@
 /* Histórico pior que o presente. Discreto de propósito: é contexto, não
    chamado à ação — mas nunca omitido, porque em 54,5% dos municípios o
    nível consolidado de todos os anos-fonte é mais grave que o atual. */
+/* Taxa por 100 mil: o numero que decide a leitura da coluna. */
+.cell-rate {
+  display: block;
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+/* Denominador pequeno demais para a taxa ser estavel. Publicada, mas
+   marcada — suprimir em silencio seria tao desonesto quanto publicar sem
+   ressalva. */
+.cell-rate.is-unreliable {
+  color: var(--muted);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
 .risk-history {
   font-variant: small-caps;
   letter-spacing: .02em;
