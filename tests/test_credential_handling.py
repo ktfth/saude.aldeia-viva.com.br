@@ -154,6 +154,75 @@ class TestASuiteNaoUsaAsChavesDaMaquina(unittest.TestCase):
             self.assertIsNone(manager.validate_key("qualquer"))
 
 
+class TestChavesPorVariavelDeAmbiente(unittest.TestCase):
+    """`USERS_DB_JSON` e o caminho recomendado no deploy.md.
+
+    Foi acrescentado junto com o aviso de chaves ausentes, e documentado como
+    a forma preferida de carregar credenciais num deploy pelo git -- sem
+    nenhum teste que o exercitasse. Anunciar uma saida de emergencia sem
+    verificar que ela abre e a mesma familia de defeito que o `/planos`
+    prometendo limites que o codigo nao aplicava.
+    """
+
+    CHAVES = {
+        "keys": {
+            "chave-do-ambiente": {
+                "owner": "Teste",
+                "tier": "premium",
+                "rate_limit": 10000,
+            }
+        }
+    }
+
+    def test_carrega_as_chaves_do_ambiente(self) -> None:
+        import json
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(
+            os.environ, {"USERS_DB_JSON": json.dumps(self.CHAVES)}
+        ):
+            manager = app.APIKeyManager()
+            self.assertIsNotNone(manager.validate_key("chave-do-ambiente"))
+            self.assertEqual(
+                manager.validate_key("chave-do-ambiente")["tier"], "premium"
+            )
+
+    def test_tem_precedencia_sobre_o_arquivo(self) -> None:
+        """O deploy.md afirma isso; se mudar, a documentacao passa a mentir."""
+        import json
+        import os
+        from unittest.mock import patch
+
+        do_arquivo = app.api_key_manager.path
+        self.assertTrue(do_arquivo.exists(), "fixture da suite sumiu")
+
+        with patch.dict(
+            os.environ, {"USERS_DB_JSON": json.dumps(self.CHAVES)}
+        ):
+            manager = app.APIKeyManager()
+            self.assertEqual(set(manager.keys), {"chave-do-ambiente"})
+
+    def test_json_invalido_nao_derruba_o_servico(self) -> None:
+        """Segredo mal colado nao pode impedir o processo de subir."""
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {"USERS_DB_JSON": "{isto nao e json"}):
+            manager = app.APIKeyManager()
+            self.assertEqual(manager.keys, {})
+            self.assertIsNone(manager.validate_key("qualquer"))
+
+    def test_o_deploy_md_descreve_a_precedencia_que_o_codigo_aplica(self) -> None:
+        from pathlib import Path
+
+        texto = (
+            Path(__file__).resolve().parent.parent / "docs" / "deploy.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("USERS_DB_JSON", texto)
+        self.assertIn("precedência sobre `USERS_DB_PATH`", texto)
+
+
 class TestKeyValidation(unittest.TestCase):
     def test_accepts_a_plaintext_key_for_compatibility(self) -> None:
         manager = app.APIKeyManager.from_keys({"chave": {"tier": "free", "rate_limit": 10}})
