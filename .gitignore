@@ -19,3 +19,9 @@ docker-compose.override.yml
 
 # Saida de execucao de testes de navegador.
 test-results/
+
+# Chaves de API. Mantido FORA do versionamento de proposito: o arquivo guarda
+# credenciais, e a decisao de publica-las ou rotaciona-las e de quem opera o
+# servico. Um `git add -A` o levou junto uma vez; esta regra impede a
+# repeticao.
+data/users.json
