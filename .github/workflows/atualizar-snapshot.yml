@@ -40,8 +40,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      # `requirements-dev.txt` inclui o de producao e acrescenta o cliente
+      # de teste. Sem ele, 17 modulos de teste nao importam e o portao de
+      # qualidade passa a aprovar 342 testes em vez de 492.
       - name: Instalar dependencias
-        run: pip install --no-cache-dir -r requirements.txt
+        run: pip install --no-cache-dir -r requirements-dev.txt
 
       # Os tetos de ano sao numeros cravados no codigo sobre um fato do mundo
       # exterior. Nao derruba o job: e um aviso, e a recarga funciona sem ele.

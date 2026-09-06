@@ -1,0 +1,19 @@
+# Dependencias para rodar a suite. Nao entram em producao: `requirements.txt`
+# e o que a Vercel e o Docker instalam, e o cliente de teste nao tem lugar la.
+#
+# Ate a Action existir, ninguem tinha percebido que elas nao estavam
+# declaradas em lugar nenhum. A suite rodava na minha maquina porque o
+# pacote ja estava instalado; num ambiente limpo, 17 modulos de teste nao
+# importavam e so 342 dos 492 testes rodavam -- silenciosamente, porque
+# ImportError em modulo de teste vira "erro" e nao "faltou dependencia".
+#
+# Sao dois pacotes porque o `TestClient` do starlette mudou de cliente HTTP:
+# starlette < 1.0 exige `httpx`, e starlette >= 1.0 exige `httpx2`. Como
+# `requirements.txt` nao fixa versao, a mesma arvore instala uma ou outra
+# dependendo do dia -- foi exatamente o que separou minha maquina
+# (starlette 0.50.0) do runner (starlette 1.6.0). Declarar os dois faz a
+# suite rodar em qualquer das duas.
+-r requirements.txt
+
+httpx>=0.27
+httpx2>=0.1

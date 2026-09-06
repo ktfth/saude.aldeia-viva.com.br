@@ -110,7 +110,15 @@ def comparar(anterior, novo):
 
 def escrever(relatorio) -> None:
     bruto = json.dumps(relatorio, ensure_ascii=False, separators=(",", ":"))
-    comprimido = gzip.compress(bruto.encode("utf-8"), 9)
+    # `mtime=0` fixa o cabecalho do gzip, que por padrao carrega a hora da
+    # compressao. Higiene de reprodutibilidade, mas NAO explica o que foi
+    # observado: o runner reproduziu os mesmos 10 agravos e os mesmos 5.408
+    # municipios e ainda assim gerou um arquivo 3 KB menor. Uma diferenca
+    # dessa ordem nao cabe num cabecalho de 4 bytes -- provavelmente e build
+    # de zlib diferente entre Windows e Linux, e isso nao foi confirmado.
+    # A consequencia pratica: igualdade byte a byte entre plataformas nao e
+    # garantida, entao "o snapshot mudou?" nao deve ser decidido por bytes.
+    comprimido = gzip.compress(bruto.encode("utf-8"), compresslevel=9, mtime=0)
     codificado = base64.b64encode(comprimido).decode("ascii")
     DESTINO.write_text(CABECALHO + codificado + RODAPE, encoding="utf-8")
     print()
