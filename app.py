@@ -799,6 +799,37 @@ def canonical_url(request: Request, path: str) -> str:
     return f"{public_base_url(request)}{path}"
 
 
+_ASSET_VERSION: str | None = None
+
+
+def static_asset_version() -> str:
+    """Impressão digital dos arquivos CSS, para invalidar cache de navegador.
+
+    StaticFiles envia ETag e Last-Modified, mas um navegador que já tem a
+    folha em cache pode continuar usando a versão antiga depois de um deploy.
+    Observado ao vivo: o CSS novo estava no servidor e a página renderizava
+    com o antigo. Sem isto, uma correção de estilo simplesmente não chega ao
+    usuário — e nada falha.
+
+    Calculada uma vez por processo, sobre mtime e tamanho de cada arquivo.
+    """
+    global _ASSET_VERSION
+    if _ASSET_VERSION is not None:
+        return _ASSET_VERSION
+
+    digest = hashlib.sha256()
+    try:
+        for path in sorted((STATIC_DIR / "css").rglob("*.css")):
+            stat = path.stat()
+            digest.update(f"{path.name}:{stat.st_mtime_ns}:{stat.st_size}".encode())
+    except OSError as error:  # pragma: no cover - defensivo
+        logger.warning("Não foi possível versionar os assets: %s", error)
+        digest.update(b"sem-versao")
+
+    _ASSET_VERSION = digest.hexdigest()[:8]
+    return _ASSET_VERSION
+
+
 def render_web_page(
     request: Request,
     *,
@@ -850,7 +881,7 @@ def render_web_page(
   <meta name="twitter:description" content="{escape_html(description)}">
   {schema}
   {extra_head}
-  <link rel="stylesheet" href="/static/css/main.css">
+  <link rel="stylesheet" href="/static/css/main.css?v={static_asset_version()}">
 </head>
 <body>
   <a class="skip-link" href="#conteudo-principal">Pular para o conteúdo</a>
@@ -1010,7 +1041,7 @@ def render_dashboard_page(request: Request) -> str:
             breadcrumb_json_ld(request, "Dashboard", "/dashboard"),
         ],
         active="dashboard",
-        extra_script='<script src="/static/js/dashboard.js" defer></script>',
+        extra_script='<script src="/static/js/dashboard.js?v={static_asset_version()}" defer></script>',
     )
 
 
