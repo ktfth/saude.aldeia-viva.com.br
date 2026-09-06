@@ -33,6 +33,22 @@ class Tier:
 
 # Teto absoluto por chamada, imposto pelo próprio parâmetro `limite`.
 # Nenhum tier ultrapassa isto; a base completa se obtém com `pagina`.
+# DÍVIDA CONHECIDA — `rate_limit` não é aplicado em produção.
+#
+# Medido em 2026-09-06: 40 requisições anônimas em rajada contra o serviço
+# em produção devolveram 40x 200 e nenhum 429, com teto declarado de 10/min.
+# `RateLimiter` guarda a contagem em memória do processo, e em serverless
+# cada invocação pode cair numa instância nova com o dicionário vazio.
+# Aplicar de verdade exige estado compartilhado.
+#
+# `max_results` NÃO tem esse problema: é por requisição, sem estado, e foi
+# verificado em produção — anônimo recebe 5 de 5.408, premium recebe os 30
+# que pediu. A fronteira comercial que mais importa funciona.
+#
+# Decisão de quem opera, em 2026-09-06: manter assim e priorizar demanda —
+# sem usuários externos ninguém esbarra no limite. Esta nota existe para a
+# dívida não virar surpresa quando houver.
+
 MAX_RESULTS_PER_CALL = 1000
 
 

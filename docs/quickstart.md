@@ -2,6 +2,28 @@
 
 Este guia mostra o caminho mínimo para colocar o projeto em execução local.
 
+## Avaliar sem chave
+
+Uma consulta **dirigida** devolve a resposta completa no acesso anônimo. O
+teto de 5 registros corta varredura ampla, não a pergunta "como está a minha
+cidade". Medido em produção:
+
+```
+?municipio=Goiania            ->  3 de 3     completo
+?municipio=Recife&estado=PE   ->  1 de 1     completo
+?municipio=355030             ->  1 de 1     completo
+?doenca=dengue&estado=SP      ->  5 de 634   cortado
+```
+
+```bash
+curl "https://saude.aldeia-viva.com.br/v1/risk-index?municipio=Goiania"
+```
+
+A resposta traz o que diferencia este serviço de baixar o SINAN direto:
+`incidencia.por_100k` com denominador do IBGE, `nivel_risco_fonte_atual`
+separado do histórico, e `recencia` dizendo de quando é cada sinal. Leia
+`X-Total-Results` para saber se houve corte.
+
 ## Requisitos
 
 - Python 3.12 ou superior
