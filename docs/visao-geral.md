@@ -4,10 +4,11 @@ O Aldeia Viva Saúde é um serviço de inteligência epidemiológica que organiz
 
 Em vez de expor apenas registros brutos, a aplicação entrega:
 
-- índice de risco por município
+- índice de risco por município, com incidência por 100 mil habitantes
 - alertas altos e críticos por doença e vírus
+- a idade de cada fonte e a recência de cada sinal, declaradas
 - catálogo de agravos suportados
-- páginas públicas com contexto, SEO e orientação para agentes
+- páginas públicas com contexto e orientação para agentes
 
 ## Para quem este projeto foi feito
 
@@ -20,9 +21,11 @@ Em vez de expor apenas registros brutos, a aplicação entrega:
 
 1. O app identifica as doenças habilitadas.
 2. As fontes reais são baixadas e agregadas por município.
-3. O score de risco é calculado por agravo e consolidado no município.
-4. A API expõe os resultados em JSON.
-5. O dashboard e as páginas públicas consomem o mesmo estado agregado.
+3. O score é calculado por agravo; o nível do município é o pior entre eles.
+4. O denominador populacional do IBGE e a dimensão temporal são aplicados na
+   entrada do relatório em memória, valendo para carga nova, cache e snapshot.
+5. A API expõe os resultados em JSON, com os cabeçalhos que declaram o corte.
+6. O dashboard e as páginas públicas consomem o mesmo estado agregado.
 
 ## Princípios do projeto
 
@@ -30,7 +33,10 @@ Em vez de expor apenas registros brutos, a aplicação entrega:
 - Dados reais antes de simulação
 - Município como granularidade pública
 - Score específico por agravo, não uma fórmula única para tudo
-- Degradação elegante quando o ambiente não permite reprocessar tudo na hora
+- Taxa antes de contagem absoluta: só ela compara municípios de portes diferentes
+- Uma autoridade por fato: cada número nasce em um lugar só
+- Nenhum número sem a idade do dado que o originou
+- Degradação elegante, e declarada: renovar nunca pode perder cobertura
 
 ## O que o usuário vê
 
