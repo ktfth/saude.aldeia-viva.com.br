@@ -10,9 +10,17 @@ the future cockpit (drill-down, year comparisons, maps, etc.).
 All functions here should remain as pure as possible.
 """
 
+from datetime import date
 from typing import Any, Iterable, Mapping
 
 from domain.disease_sources import DISEASE_SOURCES, classification_label
+from domain.epi_week import (
+    MINIMO_PARA_TENDENCIA,
+    SEMANAS_PROVISORIAS,
+    rotulo_semana,
+    semana_epidemiologica,
+    tendencia,
+)
 from domain.risk import (
     RISK_FORMULA,
     finalize_disease_summary,
@@ -95,6 +103,11 @@ def create_disease_summary(
         "tipo": source.tipo,
         "perfil_risco": source.risk_profile,
         "formula_risco": risk_profile_for_source(source).formula,
+        # Casos prováveis por semana epidemiológica de INÍCIO DE SINTOMAS.
+        # É a data que o boletim usa para a curva epidêmica: reflete quando
+        # houve transmissão, e não quando a notificação foi digitada. A data
+        # de notificação entra só como fallback.
+        "serie_semanal": {},
         "periodo": {
             "ano": source_year if source_year is not None else year,
             "ano_solicitado": year,
@@ -155,6 +168,96 @@ def add_record_to_summaries(
     update_latest_date(disease, "ultima_notificacao", notification_date)
     update_latest_date(disease, "ultimo_inicio_sintomas", symptom_date)
 
+    # A contagem cai aqui, depois do `return` dos descartados: a curva usa o
+    # mesmo numerador da incidência, e não o total de notificações.
+    referencia = symptom_date or notification_date
+    if referencia:
+        try:
+            dia = date.fromisoformat(referencia)
+        except (TypeError, ValueError):
+            return
+        rotulo = rotulo_semana(semana_epidemiologica(dia))
+        serie = disease["serie_semanal"]
+        serie[rotulo] = serie.get(rotulo, 0) + 1
+
+
+def agregar_curvas(
+    municipalities: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Curva por agravo, nacional e por UF, somada ANTES da poda.
+
+    A série de cada município é descartada quando o volume é baixo demais
+    para significar algo. Reconstruir o total a partir do que sobra subconta:
+    medido, a curva nacional de dengue somada pelos municípios dava 440.685
+    contra 449.101 casos reais — 1,9% a menos, justamente os municípios
+    pequenos. Aqui a soma acontece antes, e fecha.
+
+    A curva agregada é barata: dez agravos por trinta e cinco semanas, mais
+    vinte e sete UFs. O que pesaria seria a série por município, e essa
+    continua podada.
+    """
+    nacional: dict[str, dict[str, int]] = {}
+    por_uf: dict[str, dict[str, dict[str, int]]] = {}
+
+    for municipality in municipalities:
+        uf = municipality.get("estado") or "??"
+        for codigo, disease in (municipality.get("doencas_por_codigo") or {}).items():
+            serie = disease.get("serie_semanal") or {}
+            if not serie:
+                continue
+            alvo_nacional = nacional.setdefault(codigo, {})
+            alvo_uf = por_uf.setdefault(uf, {}).setdefault(codigo, {})
+            for rotulo, contagem in serie.items():
+                alvo_nacional[rotulo] = alvo_nacional.get(rotulo, 0) + contagem
+                alvo_uf[rotulo] = alvo_uf.get(rotulo, 0) + contagem
+
+    return {
+        "nacional": {
+            codigo: {
+                "serie_semanal": dict(sorted(serie.items())),
+                "tendencia": tendencia(serie),
+            }
+            for codigo, serie in sorted(nacional.items())
+        },
+        "por_uf": {
+            uf: {
+                codigo: {
+                    "serie_semanal": dict(sorted(serie.items())),
+                    "tendencia": tendencia(serie),
+                }
+                for codigo, serie in sorted(agravos.items())
+            }
+            for uf, agravos in sorted(por_uf.items())
+        },
+        "semanas_provisorias": SEMANAS_PROVISORIAS,
+        "aviso": (
+            "Curva de casos prováveis por semana epidemiológica de início de "
+            "sintomas. As últimas semanas estão incompletas — as notificações "
+            "ainda chegam — e por isso não entram no cálculo da direção. "
+            "Medido: 84% das notificações chegam em uma semana, 93% em duas."
+        ),
+    }
+
+
+def _resolver_tendencia(disease: dict[str, Any]) -> None:
+    """Direção do agravo naquele município, e o que vale guardar da curva.
+
+    A curva por município é mantida apenas quando há volume para ela
+    significar algo. Abaixo do mínimo ela é ruído com aparência de série:
+    três casos espalhados em trinta semanas desenham um gráfico que sugere
+    padrão onde não há, e ainda multiplicariam o tamanho do artefato por
+    5.408 municípios vezes 10 agravos.
+
+    A direção é sempre calculada e sempre declarada — inclusive como
+    `indeterminada`, que é uma afirmação sobre o que este dado sustenta, e
+    não sobre a epidemia.
+    """
+    serie = disease.get("serie_semanal") or {}
+    disease["tendencia"] = tendencia(serie)
+    if sum(serie.values()) < MINIMO_PARA_TENDENCIA:
+        disease["serie_semanal"] = {}
+        disease["tendencia"]["serie_omitida"] = bool(serie)
+
 
 def finalize_municipality_rows(
     municipalities: Iterable[dict[str, Any]],
@@ -165,6 +268,8 @@ def finalize_municipality_rows(
             finalize_disease_summary(disease)
             for disease in municipality.pop("doencas_por_codigo").values()
         ]
+        for disease in diseases:
+            _resolver_tendencia(disease)
         diseases.sort(key=lambda item: item["risk_score"], reverse=True)
 
         municipality["doencas"] = diseases
@@ -247,6 +352,9 @@ def build_epidemiology_report(
             )
             add_record_to_summaries(disease, municipality, source, record)
 
+    # Antes da finalização, que poda as séries de baixo volume.
+    curvas = agregar_curvas(municipalities.values())
+
     rows = finalize_municipality_rows(municipalities.values())
     alerts = build_high_alerts(rows)
     return {
@@ -254,6 +362,7 @@ def build_epidemiology_report(
             "periodo": {"ano": year},
             "fonte": "SINAN/OpenDataSUS via Portal de Dados Abertos do SUS",
             "municipios": len(rows),
+            "curvas": curvas,
             "formula_risco": RISK_FORMULA,
             "formulas_por_doenca": {
                 source.codigo: risk_profile_for_source(source).formula
