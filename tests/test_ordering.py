@@ -135,6 +135,47 @@ class TestSortMunicipalities(unittest.TestCase):
         )
 
 
+class TestOEndpointAceitaTodaOrdenacaoDeclarada(unittest.TestCase):
+    """A terceira autoridade, que a versão anterior desta rede não cobria.
+
+    O endpoint validava `ordenar` com um padrão cravado à mão —
+    `^(score|taxa|casos|obitos)$`. Acrescentar `taxa_atual` ao domínio e ao
+    `_KEYS` deixou o serviço sabendo ordenar por ela e recusando o pedido com
+    422. Descoberto EM PRODUÇÃO, depois de deployar: a rede conferia
+    `ORDERINGS` contra `_KEYS` e parava aí.
+
+    Aqui a verificação é de comportamento, e não de introspecção do
+    validador: o que importa é a requisição ser aceita, não como o padrão
+    está representado por dentro.
+    """
+
+    def setUp(self) -> None:
+        ensure_real_report()
+        app.rate_limiter.reset()
+        self.client = TestClient(app.app)
+        self.client.__enter__()
+        self.addCleanup(self.client.__exit__, None, None, None)
+
+    def test_nenhuma_ordenacao_declarada_e_recusada(self) -> None:
+        recusadas = {}
+        for nome in ORDERINGS:
+            app.rate_limiter.reset()
+            resposta = self.client.get(f"/v1/risk-index?limite=1&ordenar={nome}")
+            if resposta.status_code >= 400:
+                recusadas[nome] = resposta.status_code
+        self.assertEqual(
+            recusadas,
+            {},
+            "ordenação que o serviço sabe fazer e o endpoint recusa",
+        )
+
+    def test_ordenacao_desconhecida_continua_recusada(self) -> None:
+        """Derivar o padrão não pode ter aberto o parâmetro para qualquer coisa."""
+        app.rate_limiter.reset()
+        resposta = self.client.get("/v1/risk-index?limite=1&ordenar=inventada")
+        self.assertEqual(resposta.status_code, 422)
+
+
 class TestOrderingEndpoint(unittest.TestCase):
     def setUp(self) -> None:
         ensure_real_report()

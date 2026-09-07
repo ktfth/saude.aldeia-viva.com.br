@@ -2332,11 +2332,19 @@ async def get_risk_index(
     ),
     ordenar: str = Query(
         default="score",
-        pattern="^(score|taxa|casos|obitos)$",
+        # Derivado de `ORDERINGS`: era a TERCEIRA tabela declarando as
+        # ordenações válidas, e a que o usuário encontra primeiro.
+        # Acrescentar `taxa_atual` ao domínio e ao `_KEYS` deixava o
+        # endpoint recusando um valor que o serviço sabe ordenar — 422
+        # para uma ordenação implementada e documentada.
+        pattern=f"^({'|'.join(ORDERINGS)})$",
         description=(
             "Critério de ordenação. `score` soma contagens absolutas e "
             "correlaciona 0,82 com a população; `taxa` usa incidência por 100 "
-            "mil habitantes e é o que compara municípios de portes diferentes."
+            "mil habitantes e é o que compara municípios de portes "
+            "diferentes; `taxa_atual` usa só a parte da incidência que vem "
+            "de arquivo do ano corrente, e é a que responde onde está "
+            "acontecendo agora."
         ),
     ),
     pagina: int = Query(
