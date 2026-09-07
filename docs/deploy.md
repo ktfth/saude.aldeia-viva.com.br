@@ -90,6 +90,7 @@ Todas são opcionais; os valores entre parênteses são os padrões.
 | `SINAN_REPORT_CACHE_MAX_AGE_DAYS` | dias até a cache agregada expirar (7). `0` desliga a expiração — use em ambientes sem rede |
 | `SINAN_FORCE_REFRESH` | `1` força recarga na inicialização |
 | `SINAN_DISABLE_CACHE` | `1` desliga a cache de arquivos brutos |
+| `SINAN_SOURCE_CACHE_MAX_AGE_DAYS` | dias até um arquivo-fonte baixado deixar de ser reaproveitado (padrão: 1). `0` desliga a expiração — os arquivos preliminares crescem durante o ano, e sem prazo o cache servia em setembro o download de abril |
 | `SINAN_DISABLE_REPORT_CACHE` | `1` desliga a cache agregada |
 | `PUBLIC_BASE_URL` | URL pública usada em links canônicos e no `agent.json` |
 | `USERS_DB_PATH` | arquivo de chaves de API (`data/users.json`) |

@@ -30,6 +30,7 @@ import csv
 import hashlib
 import io
 import os
+import time
 import tempfile
 import urllib.parse
 import zipfile
@@ -143,14 +144,70 @@ def load_latest_available_records(
 # problems during the gradual Fase 0 extraction from the monolith.
 
 
+# Dias até um arquivo-fonte baixado deixar de ser reaproveitado.
+#
+# Ele não tinha prazo: `if cache_path.exists(): return ...`, para sempre e sem
+# dizer nada. Os arquivos preliminares de arbovirose crescem durante o ano,
+# então o cache servia em setembro o download de abril.
+#
+# Isso enganou TRÊS medições nesta série. A pior: uma recarga comparou os
+# totais e concluiu que nada tinha mudado, e a conclusão de negócio a tirar
+# dali era "o pipeline de atualização não vale a pena". Com o cache desligado,
+# a mesma recarga trouxe +195.160 casos de dengue e +229 óbitos. Só desconfiei
+# porque o número de Zika bateu EXATAMENTE com o de abril.
+#
+# Um dia: dentro de uma sessão de trabalho o cache continua evitando o
+# download; entre dias, ele deixa de mentir.
+DEFAULT_SOURCE_CACHE_MAX_AGE_DAYS = 1
+
+
+def source_cache_max_age_days() -> int:
+    """Lido a cada chamada, e não no import — como `report_cache_max_age_days`."""
+    try:
+        return int(
+            os.getenv(
+                "SINAN_SOURCE_CACHE_MAX_AGE_DAYS",
+                str(DEFAULT_SOURCE_CACHE_MAX_AGE_DAYS),
+            )
+        )
+    except ValueError:
+        return DEFAULT_SOURCE_CACHE_MAX_AGE_DAYS
+
+
+def cached_file_age_days(cache_path: Path) -> float | None:
+    try:
+        idade = time.time() - cache_path.stat().st_mtime
+    except OSError:
+        return None
+    return idade / 86400
+
+
 def download_bytes(url: str) -> bytes:
 
     if os.getenv("SINAN_DISABLE_CACHE") == "1":
         return fetch_url_bytes(url)
 
     cache_path = cache_path_for_url(url)
+    limite = source_cache_max_age_days()
     if cache_path.exists():
-        return cache_path.read_bytes()
+        idade = cached_file_age_days(cache_path)
+        if idade is not None and (limite <= 0 or idade <= limite):
+            # O aviso é o ponto: servir do cache em silêncio é o que fazia uma
+            # medição parecer uma medição da fonte.
+            logger.info(
+                "Usando cópia em cache de %s (%.1f dia(s); limite %s).",
+                url,
+                idade,
+                "desligado" if limite <= 0 else limite,
+            )
+            return cache_path.read_bytes()
+        logger.info(
+            "Cópia em cache de %s tem %.1f dia(s), acima do limite de %s; "
+            "buscando de novo.",
+            url,
+            idade if idade is not None else -1,
+            limite,
+        )
 
     payload = fetch_url_bytes(url)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
