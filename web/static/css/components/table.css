@@ -131,3 +131,11 @@ tr:last-child td { border-bottom: 0; }
 
   .table-wrap .empty-cell { grid-column: 1 / -1; text-align: left; }
 }
+
+/* Direção do agravo principal. Só aparece quando há direção — `indeterminada`
+   não vira símbolo, porque um ícone para "não sei" ocupa a linha sem dizer
+   nada. */
+.cell-trend { font-weight: 700; }
+.trend-up { color: var(--red); }
+.trend-down { color: var(--green); }
+.trend-flat { color: var(--muted); }

@@ -88,6 +88,27 @@ function badge(value) {
  * 6.612 por 100 mil, não aparecia. A taxa é a única medida comparável entre
  * municípios de portes diferentes.
  */
+const SETAS = {
+  subindo: ['&uarr;', 'trend-up', 'subindo'],
+  descendo: ['&darr;', 'trend-down', 'descendo'],
+  estavel: ['&rarr;', 'trend-flat', 'estável'],
+};
+
+// Espelha `render_trend` no servidor. Duas implementações da mesma célula, em
+// linguagens diferentes; `tests/test_renderers_agree.py` exige que emitam as
+// mesmas classes, porque divergir faz a informação sumir ao filtrar.
+function trendCell(item) {
+  const principal = (item.doencas || [])[0];
+  if (!principal) return '';
+  const t = principal.tendencia || {};
+  const seta = SETAS[t.direcao];
+  if (!seta) return '';
+  const [simbolo, classe, rotulo] = seta;
+  const semanas = t.janela_semanas || 4;
+  const titulo = `${principal.nome || ''}: ${t.casos_janela_recente || 0} casos nas últimas ${semanas} semanas fechadas contra ${t.casos_janela_anterior || 0} nas ${semanas} anteriores`;
+  return `<span class="cell-sub cell-trend ${classe}" title="${escapeHtml(titulo)}">${simbolo} ${escapeHtml(principal.codigo || '')} ${rotulo}</span>`;
+}
+
 function incidenceCell(item) {
   const inc = item.incidencia || {};
   const rate = inc.por_100k;
@@ -100,7 +121,18 @@ function incidenceCell(item) {
     const title = inc.confiavel ? '' : ` title="${escapeHtml(inc.ressalva || '')}"`;
     html = `<strong class="${cls}"${title}>${fmt.format(Math.round(rate))}</strong>`
       + '<span class="cell-sub">por 100 mil hab.</span>';
+    // Quanto da taxa vem de arquivo do ano corrente. Espelha
+    // `render_incidence_cell` no servidor: os dois desenham a MESMA celula, e
+    // divergir faz o dado sumir ao filtrar.
+    const fracao = inc.fracao_de_fonte_atual;
+    if (fracao != null && fracao < 0.995) {
+      const atual = inc.por_100k_fonte_atual;
+      html += atual
+        ? `<span class="cell-sub cell-vintage">${fmt.format(Math.round(atual))} de fonte atual (${Math.round(fracao * 100)}%)</span>`
+        : '<span class="cell-sub cell-vintage cell-deaths">nada de fonte atual</span>';
+    }
   }
+  html += trendCell(item);
   html += `<span class="cell-sub">${fmt.format(item.total_casos_provaveis || 0)} casos</span>`;
   const deaths = Number(item.total_obitos || 0);
   if (deaths) {

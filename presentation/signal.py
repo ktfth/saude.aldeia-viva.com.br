@@ -214,6 +214,51 @@ def render_risk_cell(row: Mapping[str, Any], badge_renderer) -> str:
     return "".join(parts)
 
 
+# Direção do agravo principal, na forma que uma tabela comporta.
+SETA_DA_DIRECAO = {
+    "subindo": ("&uarr;", "trend-up", "subindo"),
+    "descendo": ("&darr;", "trend-down", "descendo"),
+    "estavel": ("&rarr;", "trend-flat", "estável"),
+}
+
+
+def render_trend(row: Mapping[str, Any]) -> str:
+    """Para onde o agravo principal do município está indo.
+
+    A direção existia no dado e não aparecia na tela. Decisão de alocação se
+    toma por ela: 500 casos em queda e 500 em alta são decisões opostas, e
+    apareciam idênticos.
+
+    Mostra o agravo de maior score, que é o primeiro da lista, e só quando há
+    direção — `indeterminada` fica de fora porque um símbolo para "não sei"
+    ocuparia a linha sem dizer nada. Quem quiser o motivo lê
+    `tendencia.motivo` na API.
+    """
+    doencas = row.get("doencas") or []
+    if not doencas:
+        return ""
+
+    principal = doencas[0]
+    trend = principal.get("tendencia") or {}
+    simbolo = SETA_DA_DIRECAO.get(str(trend.get("direcao")))
+    if not simbolo:
+        return ""
+
+    seta, classe, rotulo = simbolo
+    recente = trend.get("casos_janela_recente") or 0
+    anterior = trend.get("casos_janela_anterior") or 0
+    semanas = trend.get("janela_semanas") or 4
+    titulo = (
+        f"{escape(str(principal.get('nome') or ''))}: {recente} casos nas "
+        f"últimas {semanas} semanas fechadas contra {anterior} nas {semanas} "
+        "anteriores"
+    )
+    return (
+        f'<span class="cell-sub cell-trend {classe}" title="{titulo}">'
+        f"{seta} {escape(str(principal.get('codigo') or ''))} {rotulo}</span>"
+    )
+
+
 def render_incidence_cell(row: Mapping[str, Any]) -> str:
     """Coluna numérica: incidência primeiro, contagem absoluta abaixo.
 
@@ -262,6 +307,8 @@ def render_incidence_cell(row: Mapping[str, Any]) -> str:
                     '<span class="cell-sub cell-vintage cell-deaths">'
                     "nada de fonte atual</span>"
                 )
+
+    parts.append(render_trend(row))
 
     cases = int(row.get("total_casos_provaveis") or 0)
     parts.append(
