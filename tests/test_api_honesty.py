@@ -12,7 +12,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 import app
-from tests import ensure_real_report
+from tests import PREMIUM_KEY, ensure_real_report
 
 
 class TestResultCountHeaders(unittest.TestCase):
@@ -77,6 +77,59 @@ class TestRefreshIsProtected(unittest.TestCase):
     def test_invalid_key_is_rejected(self) -> None:
         response = self.client.post("/v1/refresh", headers={"X-API-Key": "nope"})
         self.assertEqual(response.status_code, 401)
+
+
+class TestOMetadataContinuaBarato(unittest.TestCase):
+    """`/v1/metadata` existe para ser chamado antes de decidir buscar o resto.
+
+    É o endpoint que um agente consulta para conferir a idade do dado. Ao
+    acrescentar as curvas semanais ele passou de 9 KB para **248 KB**, e 90%
+    disso eram as 27 curvas estaduais — que nada consumia e nada documentava.
+    O endpoint barato tinha deixado de ser barato, e nada acusava.
+
+    As curvas estaduais não foram descartadas: são exatas, custam 29 KB
+    comprimidos no snapshot, e passaram a ser servidas em
+    `/v1/professional-report?estado=XX`, onde alguém nomeia o estado.
+
+    O teto abaixo não é uma preferência de estilo: é o que separa "consulto
+    antes de decidir" de "consulto e já paguei o preço da decisão".
+    """
+
+    # Folga sobre os 25 KB atuais, e ainda uma ordem de grandeza abaixo do que
+    # o endpoint chegou a pesar.
+    TETO_KB = 60
+
+    def setUp(self) -> None:
+        ensure_real_report()
+        app.rate_limiter.reset()
+        self.client = TestClient(app.app)
+        self.client.__enter__()
+        self.addCleanup(self.client.__exit__, None, None, None)
+
+    def test_o_metadata_cabe_no_teto(self) -> None:
+        corpo = self.client.get("/v1/metadata").content
+        tamanho = len(corpo) / 1024
+        self.assertLess(
+            tamanho,
+            self.TETO_KB,
+            f"/v1/metadata está em {tamanho:.0f} KB; ele existe para ser "
+            "consultado antes de buscar o resto",
+        )
+
+    def test_as_curvas_estaduais_nao_viajam_nele(self) -> None:
+        curvas = self.client.get("/v1/metadata").json().get("curvas") or {}
+        self.assertIn("nacional", curvas, "a curva nacional é o que ele deve trazer")
+        self.assertNotIn("por_uf", curvas)
+
+    def test_a_curva_estadual_existe_onde_se_pede_o_estado(self) -> None:
+        """Remover de um lugar só vale se ela estiver disponível no outro."""
+        app.rate_limiter.reset()
+        resposta = self.client.get(
+            "/v1/professional-report?estado=GO", headers={"X-API-Key": PREMIUM_KEY}
+        )
+        curva = (resposta.json().get("metadata") or {}).get("curva_do_estado")
+        self.assertTrue(curva, "curva do estado ausente de onde ela deveria estar")
+        self.assertIn("DENG", curva)
 
 
 if __name__ == "__main__":

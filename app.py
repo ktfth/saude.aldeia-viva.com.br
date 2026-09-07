@@ -2478,7 +2478,8 @@ async def get_professional_report(
 
     return {
         "metadata": {
-            **db_metadata,
+            **metadata_sem_curvas_por_uf(db_metadata),
+            "curva_do_estado": curva_do_estado(db_metadata, estado),
             "report_type": "professional",
             "generated_for": user.get("owner"),
             "analytics_version": "1.0.0",
@@ -2545,13 +2546,47 @@ async def export_pdf(
     )
 
 
+def metadata_sem_curvas_por_uf(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """Metadata sem as 27 curvas estaduais.
+
+    `/v1/metadata` existe para ser barato: é o que um agente chama para
+    conferir a idade do dado antes de decidir se vale buscar o resto. Ao
+    acrescentar as curvas, ele passou de 9 KB para 248 KB — e **90% disso era
+    `curvas.por_uf`**, que nada consumia e nada documentava.
+
+    A curva estadual não é descartada: ela é exata (reconstruí-la somando os
+    municípios perde os casos das séries podadas — 223 só em GO/DENG) e custa
+    29 KB comprimidos no snapshot. Ela passa a ser servida onde alguém pede um
+    estado, em `/v1/professional-report?estado=XX`, em vez de viajar inteira em
+    toda chamada.
+    """
+    curvas = metadata.get("curvas")
+    if not isinstance(curvas, Mapping) or "por_uf" not in curvas:
+        return dict(metadata)
+    enxuto = dict(metadata)
+    enxuto["curvas"] = {
+        chave: valor for chave, valor in curvas.items() if chave != "por_uf"
+    }
+    return enxuto
+
+
+def curva_do_estado(
+    metadata: Mapping[str, Any], estado: str | None
+) -> dict[str, Any] | None:
+    """A curva daquela UF, quando o pedido nomeia uma."""
+    if not estado:
+        return None
+    por_uf = ((metadata.get("curvas") or {}).get("por_uf")) or {}
+    return por_uf.get(estado.strip().upper())
+
+
 @app.get(
     "/v1/metadata",
     tags=["Sistema"],
     summary="Metadados da carga de dados",
 )
 async def get_metadata() -> dict[str, Any]:
-    return db_metadata
+    return metadata_sem_curvas_por_uf(db_metadata)
 
 
 @app.get(

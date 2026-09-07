@@ -255,8 +255,10 @@ def _resolver_tendencia(disease: dict[str, Any]) -> None:
     serie = disease.get("serie_semanal") or {}
     disease["tendencia"] = tendencia(serie)
     if sum(serie.values()) < MINIMO_PARA_TENDENCIA:
+        # A série some; `tendencia.motivo` já diz por quê. Havia aqui um
+        # `serie_omitida` booleano que não acrescentava nada a isso — série
+        # vazia com motivo escrito é a mesma informação, dita uma vez.
         disease["serie_semanal"] = {}
-        disease["tendencia"]["serie_omitida"] = bool(serie)
     else:
         # Em ordem cronológica. A acumulação segue a ordem dos registros no
         # arquivo, que não é a do tempo: a série saía `SE02, SE18, SE15,

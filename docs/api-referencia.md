@@ -34,6 +34,15 @@ O `/openapi.json` **não** descreve os corpos de resposta: o FastAPI os publica
 como `schema: {}`. Se você precisa saber quais campos existem, use
 `contrato-v1.json`, e não o schema.
 
+**Curvas semanais.** `/v1/metadata` traz `curvas.nacional` — a série de casos
+prováveis por semana epidemiológica de cada agravo, no país. A curva de um
+estado vem em `/v1/professional-report?estado=XX`, no campo `curva_do_estado`.
+
+Ela não viaja em `/v1/metadata` de propósito: esse endpoint existe para ser
+barato — é o que um agente chama para conferir a idade do dado antes de
+decidir se vale buscar o resto —, e as 27 curvas estaduais o levariam de 9 KB
+a 248 KB.
+
 **Depreciação.** Um campo que precise sair é anunciado aqui antes, e continua
 respondendo durante a transição. Uma quebra sem esse caminho é defeito nosso.
 
