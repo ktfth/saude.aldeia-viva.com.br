@@ -90,8 +90,49 @@ class TestSortMunicipalities(unittest.TestCase):
         got = sort_municipalities(rows, "taxa")
         self.assertEqual(got[-1]["municipio"], "Antigo")
 
-    def test_all_orderings_are_declared(self) -> None:
-        self.assertEqual(set(ORDERINGS), {"score", "taxa", "casos", "obitos"})
+    def test_every_declared_ordering_has_a_key(self) -> None:
+        """A invariante real, no lugar da lista escrita à mão.
+
+        A versão anterior enumerava os nomes e reprovava a cada ordenação
+        nova — sem verificar o que importa: que `ORDERINGS`, que o endpoint
+        aceita, e `_KEYS`, que ordena de fato, digam a mesma coisa. Divergir
+        aqui faria o endpoint aceitar um nome e ordenar por outro critério,
+        em silêncio.
+        """
+        from aggregation.ordering import _KEYS
+
+        self.assertEqual(set(ORDERINGS), set(_KEYS))
+
+    def test_ordering_by_current_source_rate_exists(self) -> None:
+        """`taxa` soma todos os anos-fonte; `taxa_atual` só o corrente."""
+        self.assertIn("taxa_atual", ORDERINGS)
+
+    def test_current_rate_ordering_ignores_historical_only_rows(self) -> None:
+        """Município cuja taxa inteira vem de fonte antiga não encabeça."""
+        rows = [
+            {
+                "municipio": "So historico",
+                "incidencia": {
+                    "por_100k": 3727.0,
+                    "por_100k_fonte_atual": None,
+                    "confiavel": True,
+                },
+            },
+            {
+                "municipio": "Atual",
+                "incidencia": {
+                    "por_100k": 500.0,
+                    "por_100k_fonte_atual": 500.0,
+                    "confiavel": True,
+                },
+            },
+        ]
+        got = sort_municipalities(rows, "taxa_atual")
+        self.assertEqual(got[0]["municipio"], "Atual")
+        # E pela taxa total a ordem se inverte, que é o ponto de haver duas.
+        self.assertEqual(
+            sort_municipalities(rows, "taxa")[0]["municipio"], "So historico"
+        )
 
 
 class TestOrderingEndpoint(unittest.TestCase):

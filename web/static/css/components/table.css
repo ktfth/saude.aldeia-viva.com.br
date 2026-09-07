@@ -36,6 +36,11 @@ th.num { text-align: right; }
 
 .cell-deaths { color: var(--red); font-weight: 700; }
 
+/* Quanto da taxa vem de arquivo do ano corrente. Só aparece quando NÃO
+   está tudo atual — medido, há município com 3.727 por 100 mil e zero
+   por cento vindo de fonte atual. */
+.cell-vintage { font-variant-numeric: tabular-nums; opacity: .9; }
+
 /* Toda a linha é acionável: clique, Enter ou Espaço. Antes respondia
    apenas ao mouse, sem foco visível e sem papel semântico. */
 .municipality-row { cursor: pointer; }

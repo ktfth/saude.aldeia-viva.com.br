@@ -93,7 +93,16 @@ Parâmetros:
   `nivel_risco_fonte_atual`, **o mesmo campo que o painel exibe**. Antes usava
   o nível histórico, e 54% dos municípios devolvidos vinham com badge
   diferente do nível pedido.
-- `ordenar` — `score` (padrão), `taxa`, `casos` ou `obitos`.
+- `ordenar` — `score` (padrão), `taxa`, `taxa_atual`, `casos` ou `obitos`.
+
+  `taxa` divide **todos** os casos prováveis pela população, somando agravos de
+  todos os anos-fonte. Como o SINAN publica os arquivos consolidados com anos de
+  atraso, 16% dos casos do país vêm de fonte anterior à corrente — e há
+  município cuja taxa inteira vem dela. `taxa_atual` usa só o que veio de
+  arquivo do ano corrente, e é a que responde "onde está acontecendo agora".
+
+  Cada município traz a decomposição em `incidencia.por_100k`,
+  `incidencia.por_100k_fonte_atual` e `incidencia.fracao_de_fonte_atual`.
 - `pagina` — usada com `limite` para percorrer a base completa.
 - `limite`
 

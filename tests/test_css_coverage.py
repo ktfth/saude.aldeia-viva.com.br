@@ -29,7 +29,17 @@ EXEMPT = {
 
 
 def _markup_sources() -> list[Path]:
-    return [ROOT / "app.py", ROOT / "web" / "static" / "js" / "dashboard.js"]
+    """Todo arquivo que escreve `class="..."` numa saída HTML.
+
+    `presentation/` ficava de fora, e ele renderiza a tira de sinal, a célula
+    de risco e a de incidência — classes que a rede não conferia. Descoberto
+    ao acrescentar `.cell-vintage` ali e o teste não reparar.
+    """
+    return [
+        ROOT / "app.py",
+        ROOT / "web" / "static" / "js" / "dashboard.js",
+        *sorted((ROOT / "presentation").glob("*.py")),
+    ]
 
 
 def _css_files() -> list[Path]:
@@ -64,10 +74,21 @@ class TestCssCoverage(unittest.TestCase):
     def test_every_markup_class_has_a_rule(self) -> None:
         used = classes_used_in_markup()
         defined = classes_defined_in_css()
+        def coberta(nome: str) -> bool:
+            if nome in defined or nome in EXEMPT:
+                return True
+            # Prefixo de interpolação: `class="swatch-{bucket}"` produz
+            # `swatch-atual`, `swatch-recente` e outras. A extração captura o
+            # pedaço estático, que sozinho não é classe nenhuma — o que
+            # precisa existir é ao menos uma regra começando por ele.
+            return nome.endswith("-") and any(
+                d.startswith(nome) for d in defined
+            )
+
         orphans = {
             name: sources
             for name, sources in used.items()
-            if name not in defined and name not in EXEMPT
+            if not coberta(name)
         }
         self.assertEqual(
             orphans,

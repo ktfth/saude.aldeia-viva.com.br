@@ -14,9 +14,24 @@ não uma anotação decorativa ao lado de um ranking que ignora o denominador.
 
 from typing import Any, Iterable, Mapping
 
-ORDERINGS = ("score", "taxa", "casos", "obitos")
+ORDERINGS = ("score", "taxa", "taxa_atual", "casos", "obitos")
 
 DEFAULT_ORDERING = "score"
+
+
+def _current_rate_key(row: Mapping[str, Any]) -> tuple[int, float]:
+    """Ordena pela taxa que vem de arquivo do ano corrente.
+
+    `taxa` soma todos os anos-fonte. Para decidir onde atuar AGORA, o que
+    importa é a parte da taxa que descreve agora — medido, 16% dos casos
+    prováveis do país vêm de fonte anterior, e há município cuja taxa inteira
+    vem dela.
+    """
+    incidence = row.get("incidencia") or {}
+    rate = incidence.get("por_100k_fonte_atual")
+    if rate is None:
+        return (0, 0.0)
+    return (2 if incidence.get("confiavel") else 1, float(rate))
 
 
 def _rate_key(row: Mapping[str, Any]) -> tuple[int, float]:
@@ -45,6 +60,7 @@ _KEYS = {
     "casos": lambda row: (1, _number(row, "total_casos_provaveis")),
     "obitos": lambda row: (1, _number(row, "total_obitos")),
     "taxa": _rate_key,
+    "taxa_atual": _current_rate_key,
 }
 
 

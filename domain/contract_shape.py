@@ -50,6 +50,11 @@ DATA_KEY = "{chave}"
 MAX_DEPTH = 6
 
 _YEAR = re.compile(r"\d{4}")
+# Rótulo de semana epidemiológica: `2026-SE34`. É dado, e um novo aparece toda
+# semana — enumerá-los faria o contrato "quebrar" semanalmente, que é o falso
+# positivo que este módulo existe para evitar. Sem esta linha o contrato saltou
+# de 754 para 3.614 campos na primeira geração com a curva.
+_SEMANA = re.compile(r"\d{4}-SE\d{2}")
 _IBGE = re.compile(r"\d{6,7}")
 _UF = re.compile(r"[A-Z]{2}")
 
@@ -59,7 +64,10 @@ def is_data_key(key: str, disease_codes: Iterable[str] = ()) -> bool:
     if key in set(disease_codes):
         return True
     return bool(
-        _YEAR.fullmatch(key) or _IBGE.fullmatch(key) or _UF.fullmatch(key)
+        _YEAR.fullmatch(key)
+        or _SEMANA.fullmatch(key)
+        or _IBGE.fullmatch(key)
+        or _UF.fullmatch(key)
     )
 
 

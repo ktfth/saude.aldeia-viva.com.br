@@ -241,6 +241,28 @@ def render_incidence_cell(row: Mapping[str, Any]) -> str:
         parts.append(f'<strong class="{classes}"{title}>{formatted}</strong>')
         parts.append('<span class="cell-sub">por 100 mil hab.</span>')
 
+        # Quanto dessa taxa vem de arquivo do ano corrente.
+        #
+        # `total_casos_provaveis` soma todos os agravos de todos os anos-fonte,
+        # e o SINAN publica os consolidados com anos de atraso. Medido:
+        # Castanheira/MT mostrava 3.727 por 100 mil com ZERO por cento vindo de
+        # fonte atual — um surto de 2022 lido como situação de hoje. A fração
+        # só aparece quando não é o caso trivial de estar tudo atual.
+        fracao = incidence.get("fracao_de_fonte_atual")
+        if fracao is not None and fracao < 0.995:
+            atual = incidence.get("por_100k_fonte_atual")
+            if atual:
+                texto = f"{atual:,.0f}".replace(",", ".")
+                parts.append(
+                    f'<span class="cell-sub cell-vintage">{texto} de fonte '
+                    f"atual ({fracao * 100:.0f}%)</span>"
+                )
+            else:
+                parts.append(
+                    '<span class="cell-sub cell-vintage cell-deaths">'
+                    "nada de fonte atual</span>"
+                )
+
     cases = int(row.get("total_casos_provaveis") or 0)
     parts.append(
         f'<span class="cell-sub">{f"{cases:,}".replace(",", ".")} casos</span>'

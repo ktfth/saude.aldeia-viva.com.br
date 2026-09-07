@@ -53,17 +53,51 @@ def incidence_block(cases: int, population: int | None) -> dict[str, Any]:
     }
 
 
+def casos_de_fonte_atual(
+    municipality: Mapping[str, Any], ano_corrente: int | None
+) -> int:
+    """Casos prováveis vindos de arquivo do ano corrente, só.
+
+    `total_casos_provaveis` soma todos os agravos de todos os anos-fonte. Como
+    o SINAN publica os arquivos consolidados com anos de atraso, o total mistura
+    vintages: medido no relatório real, **16% dos casos prováveis vêm de fonte
+    anterior ao ano corrente**.
+
+    Uma taxa construída sobre esse total responde "casos por 100 mil somando
+    tudo o que temos, de 2022 a 2026" — quantidade que não sustenta decisão
+    nenhuma. Um município cuja taxa venha de Meningite de 2022 aparece ao lado
+    de um com Dengue de 2026, e o número não revela a diferença.
+    """
+    if ano_corrente is None:
+        return int(municipality.get("total_casos_provaveis") or 0)
+    total = 0
+    for doenca in municipality.get("doencas") or []:
+        ano = (doenca.get("periodo") or {}).get("ano")
+        if ano == ano_corrente:
+            total += int(doenca.get("casos_provaveis") or 0)
+    return total
+
+
 def enrich_municipality_with_population(
-    municipality: Mapping[str, Any], populations: Mapping[str, int]
+    municipality: Mapping[str, Any],
+    populations: Mapping[str, int],
+    ano_corrente: int | None = None,
 ) -> dict[str, Any]:
     """Cópia do município com população e incidência. Não muta a entrada."""
     enriched = dict(municipality)
     code = str(municipality.get("codigo_municipio") or "")
     population = populations.get(code)
     enriched["populacao"] = population
-    enriched["incidencia"] = incidence_block(
-        municipality.get("total_casos_provaveis") or 0, population
-    )
+
+    total = int(municipality.get("total_casos_provaveis") or 0)
+    bloco = incidence_block(total, population)
+
+    atuais = casos_de_fonte_atual(municipality, ano_corrente)
+    bloco["casos_fonte_atual"] = atuais
+    bloco["por_100k_fonte_atual"] = incidence_per_100k(atuais, population)
+    bloco["fracao_de_fonte_atual"] = round(atuais / total, 4) if total else None
+
+    enriched["incidencia"] = bloco
     return enriched
 
 
@@ -90,8 +124,13 @@ def enrich_with_population(
     report: Mapping[str, Any], populations: Mapping[str, int]
 ) -> dict[str, Any]:
     """Relatório com denominador populacional em cada município."""
+    # O ano corrente do relatório separa a incidência que descreve HOJE da que
+    # soma vintages antigos. Vem do metadata, e não de `date.today()`: um
+    # relatório de 2026 lido em 2027 continua tendo 2026 como ano corrente.
+    ano_corrente = ((report.get("metadata") or {}).get("periodo") or {}).get("ano")
+
     municipalities = [
-        enrich_municipality_with_population(item, populations)
+        enrich_municipality_with_population(item, populations, ano_corrente)
         for item in (report.get("municipios") or [])
     ]
     metadata = dict(report.get("metadata") or {})
