@@ -235,5 +235,38 @@ class TestDirecaoExigeRuidoEMagnitude(unittest.TestCase):
         self.assertEqual(t["direcao"], ESTAVEL)
 
 
+class TestASerieChegaEmOrdem(unittest.TestCase):
+    """A acumulação segue a ordem dos registros, que não é a do tempo."""
+
+    def test_a_serie_do_municipio_sai_ordenada(self) -> None:
+        from aggregation.report_builder import (
+            add_record_to_summaries,
+            finalize_municipality_rows,
+        )
+        from domain.disease_sources import DISEASE_SOURCES
+
+        fonte = DISEASE_SOURCES["DENG"]
+        municipio = {
+            "codigo_municipio": "1", "municipio": "X", "estado": "GO",
+            "total_notificacoes": 0, "doencas_por_codigo": {},
+        }
+        from aggregation.report_builder import create_disease_summary
+
+        doenca = create_disease_summary(fonte, 2026, 2026)
+        municipio["doencas_por_codigo"]["DENG"] = doenca
+        # Fora de ordem de propósito, como vêm do arquivo.
+        for dia in ("2026-05-04", "2026-01-05", "2026-08-10", "2026-03-02"):
+            for _ in range(4):
+                add_record_to_summaries(
+                    doenca, municipio, fonte,
+                    {"DT_SIN_PRI": dia, "CLASSI_FIN": "1"},
+                )
+
+        (linha,) = finalize_municipality_rows([municipio])
+        serie = linha["doencas"][0]["serie_semanal"]
+        self.assertEqual(list(serie), sorted(serie))
+        self.assertGreater(len(serie), 1, "a série foi podada e o teste vira vazio")
+
+
 if __name__ == "__main__":
     unittest.main()

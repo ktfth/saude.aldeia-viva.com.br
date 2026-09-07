@@ -257,6 +257,13 @@ def _resolver_tendencia(disease: dict[str, Any]) -> None:
     if sum(serie.values()) < MINIMO_PARA_TENDENCIA:
         disease["serie_semanal"] = {}
         disease["tendencia"]["serie_omitida"] = bool(serie)
+    else:
+        # Em ordem cronológica. A acumulação segue a ordem dos registros no
+        # arquivo, que não é a do tempo: a série saía `SE02, SE18, SE15,
+        # SE16` e quem iterasse recebia a curva embaralhada. A curva nacional
+        # já era ordenada; esta não era, e a diferença entre as duas é
+        # exatamente o tipo de incoerência que ninguém confere.
+        disease["serie_semanal"] = dict(sorted(serie.items()))
 
 
 def finalize_municipality_rows(
